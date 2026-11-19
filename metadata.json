@@ -1,0 +1,10 @@
+{
+  "name": "Remix خان التسعين | Khan Al-Tis\u0027een — Oriental Restaurant, Café \u0026 Live Stage",
+  "description": "Authentic family Oriental restaurant, café, shisha lounge, and live Tanoura \u0026 Oriental music stage at Mall 106, North 90th St, New Cairo.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
