@@ -7,6 +7,7 @@ import {
   Send,
   MapPin,
   MessageSquarePlus,
+  Trash2,
 } from 'lucide-react';
 import type { BranchConfig, BranchId, CustomerReview, Lang } from '../types.ts';
 import { BRANCH_CONFIGS, BRANCH_ORDER } from '../data/initialData.ts';
@@ -17,7 +18,12 @@ interface ReviewsSectionProps {
   branchConfig: BranchConfig;
   branchConfigs?: Record<BranchId, BranchConfig>;
   reviews: CustomerReview[];
-  onAddReview: (review: Omit<CustomerReview, 'id' | 'createdAt'>) => CustomerReview;
+  customerName?: string;
+  isAdmin?: boolean;
+  onAddReview: (
+    review: Omit<CustomerReview, 'id' | 'createdAt'>
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onDeleteReview?: (id: string) => void | Promise<void>;
 }
 
 const BANNED_WORDS_PATTERN =
@@ -51,22 +57,32 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
   branchConfig,
   branchConfigs = BRANCH_CONFIGS,
   reviews = [],
+  customerName,
+  isAdmin = false,
   onAddReview,
+  onDeleteReview,
 }) => {
   const t = getTranslations(lang).reviews;
 
-  const [authorName, setAuthorName] = useState('');
+  const [authorName, setAuthorName] = useState(customerName || '');
   const [selectedBranch, setSelectedBranch] = useState<BranchId>(branchConfig.id);
   const [rating, setRating] = useState<number>(5);
   const [hoverRating, setHoverRating] = useState<number>(0);
   const [comment, setComment] = useState('');
   const [filterBranch, setFilterBranch] = useState<'all' | BranchId>('all');
+  const [submitting, setSubmitting] = useState(false);
   const [errorAlert, setErrorAlert] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState(false);
 
   useEffect(() => {
     setSelectedBranch(branchConfig.id);
   }, [branchConfig.id]);
+
+  useEffect(() => {
+    if (customerName && !authorName.trim()) {
+      setAuthorName(customerName);
+    }
+  }, [customerName]);
 
   // Automatic calculation of overall star rating average based on total registered reviews
   const { averageRating, totalReviewsCount } = useMemo(() => {
@@ -85,8 +101,9 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
     return reviews.filter((r) => r.branchId === filterBranch);
   }, [reviews, filterBranch]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setErrorAlert(null);
     setSuccessNotice(false);
 
@@ -108,19 +125,39 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
       return;
     }
 
-    onAddReview({
-      author: cleanName,
-      branchId: selectedBranch,
-      rating: Math.min(5, Math.max(1, rating)),
-      comment: cleanComment,
-    });
+    // If a specific branch filter is active, ensure the new review uses that branchId so it appears immediately
+    const effectiveBranchId: BranchId = filterBranch !== 'all' ? filterBranch : selectedBranch;
+    if (effectiveBranchId !== selectedBranch) {
+      setSelectedBranch(effectiveBranchId);
+    }
 
-    setAuthorName('');
-    setComment('');
-    setRating(5);
-    setHoverRating(0);
-    setSuccessNotice(true);
-    setTimeout(() => setSuccessNotice(false), 3500);
+    setSubmitting(true);
+    try {
+      const result = await onAddReview({
+        author: cleanName,
+        branchId: effectiveBranchId,
+        rating: Math.min(5, Math.max(1, rating)),
+        comment: cleanComment,
+      });
+
+      if (!result.ok) {
+        setErrorAlert(
+          result.error || 'تعذر نشر التقييم حالياً، يرجى التحقق من الاتصال والمحاولة مرة أخرى.'
+        );
+        return;
+      }
+
+      setAuthorName(customerName || '');
+      setComment('');
+      setRating(5);
+      setHoverRating(0);
+      setSuccessNotice(true);
+      setTimeout(() => setSuccessNotice(false), 3500);
+    } catch {
+      setErrorAlert('تعذر نشر التقييم حالياً، يرجى التحقق من الاتصال والمحاولة مرة أخرى.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const activeStarValue = hoverRating || rating;
@@ -254,7 +291,13 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
               <select
                 id="review-branch-select"
                 value={selectedBranch}
-                onChange={(e) => setSelectedBranch(e.target.value as BranchId)}
+                onChange={(e) => {
+                  const nextBranch = e.target.value as BranchId;
+                  setSelectedBranch(nextBranch);
+                  if (filterBranch !== 'all') {
+                    setFilterBranch(nextBranch);
+                  }
+                }}
                 className="w-full px-3.5 py-2.5 bg-[#1E1E1E] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm font-semibold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
               >
                 {BRANCH_ORDER.map((bId) => {
@@ -341,10 +384,11 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
             {/* 5. Submit Button: "نشر التقييم" */}
             <button
               type="submit"
-              className="w-full py-3.5 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-[0_0_20px_rgba(212,175,55,0.25)]"
+              disabled={submitting}
+              className="w-full py-3.5 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-60 text-[#121212] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-[0_0_20px_rgba(212,175,55,0.25)]"
             >
               <Send className="w-4 h-4" />
-              <span>نشر التقييم</span>
+              <span>{submitting ? (lang === 'ar' ? 'جاري النشر...' : 'Publishing...') : 'نشر التقييم'}</span>
             </button>
           </form>
 
@@ -376,7 +420,10 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
                     <button
                       key={`filter-rev-${bId}`}
                       type="button"
-                      onClick={() => setFilterBranch(bId)}
+                      onClick={() => {
+                        setFilterBranch(bId);
+                        setSelectedBranch(bId);
+                      }}
                       className={`px-3 py-1 text-xs font-bold border transition-colors cursor-pointer ${
                         active
                           ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'
@@ -444,9 +491,22 @@ export const ReviewsSection: React.FC<ReviewsSectionProps> = ({
                           <span>{rev.author}</span>
                           <CheckCircle2 className="w-3.5 h-3.5 text-[#10B981] shrink-0" />
                         </h4>
-                        <span className="text-[11px] text-[#9E9585]">
-                          {formatReviewDate(rev.createdAt, lang)}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-[#9E9585]">
+                            {formatReviewDate(rev.createdAt, lang)}
+                          </span>
+                          {isAdmin && onDeleteReview && (
+                            <button
+                              type="button"
+                              onClick={() => onDeleteReview(rev.id)}
+                              title={lang === 'ar' ? 'حذف التعليق نهائياً' : 'Delete review'}
+                              aria-label={lang === 'ar' ? 'حذف التعليق نهائياً' : 'Delete review'}
+                              className="p-1.5 bg-[#1E1E1E] border border-red-500/40 text-red-400 hover:bg-red-600 hover:text-white transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </article>
                   );

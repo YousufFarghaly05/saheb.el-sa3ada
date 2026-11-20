@@ -1,17 +1,120 @@
 import { useState, useCallback, useEffect } from 'react';
 import {
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut,
 } from 'firebase/auth';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import type { CustomerUser, AuthSession } from '../types.ts';
-import { auth, isAdminEmail } from '../firebase.ts';
+import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
 
 const CUSTOMER_STORAGE_KEY = 'saheb_elsaada_customer_session_v2';
 const GUEST_FAVORITES_KEY = 'saheb_elsaada_guest_favorites_v1';
+const CUSTOMER_EMAIL_DOMAIN = 'customers.saheb-elsaada.com';
 
 const NON_ADMIN_ERROR_AR = 'عذراً، هذا الحساب لا يملك صلاحيات الإدارة';
-const INVALID_CREDENTIALS_ERROR_AR = 'البريد الإلكتروني أو كلمة المرور غير صحيحة';
+const INVALID_ADMIN_CREDENTIALS_ERROR_AR = 'البريد الإلكتروني أو كلمة المرور غير صحيحة';
+
+function normalizePhoneDigits(raw: string): string {
+  // Convert Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹) digits to Western digits
+  const western = raw
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
+  return western.replace(/\D/g, '');
+}
+
+function phoneToSyntheticEmail(cleanPhone: string): string {
+  return `${cleanPhone}@${CUSTOMER_EMAIL_DOMAIN}`;
+}
+
+function extractPhoneFromSyntheticEmail(email: string | null | undefined): string {
+  if (!email) return '';
+  const suffix = `@${CUSTOMER_EMAIL_DOMAIN}`;
+  if (email.toLowerCase().endsWith(suffix)) {
+    return email.slice(0, -suffix.length);
+  }
+  return '';
+}
+
+function getFirebaseErrorCodeAndMessage(err: unknown): { code: string; message: string } {
+  if (typeof err === 'object' && err !== null) {
+    const code = 'code' in err ? String((err as { code?: unknown }).code || '') : '';
+    const message = 'message' in err ? String((err as { message?: unknown }).message || '') : '';
+    return { code, message };
+  }
+  return { code: '', message: String(err || '') };
+}
+
+function formatCustomerAuthError(err: unknown): string {
+  const { code, message } = getFirebaseErrorCodeAndMessage(err);
+
+  if (code === 'auth/email-already-in-use') {
+    return 'رقم الهاتف مسجل بالفعل، يمكنك تسجيل الدخول مباشرة';
+  }
+  if (code === 'auth/weak-password') {
+    return 'كلمة المرور يجب أن تكون 6 أحرف على الأقل';
+  }
+  if (
+    code === 'auth/invalid-credential' ||
+    code === 'auth/wrong-password' ||
+    code === 'auth/user-not-found'
+  ) {
+    return 'رقم الهاتف أو كلمة المرور غير صحيحة';
+  }
+  if (code === 'auth/invalid-email') {
+    return 'يرجى إدخال رقم هاتف صحيح';
+  }
+  if (code === 'auth/too-many-requests') {
+    return 'تم تجاوز عدد المحاولات المسموح بها مؤقتاً. يرجى المحاولة بعد قليل.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'تعذر الاتصال بخدمة Firebase. يرجى التحقق من الاتصال بالإنترنت.';
+  }
+
+  return message || code || 'حدث خطأ غير متوقع أثناء المصادقة';
+}
+
+function parseCustomerFromDoc(
+  uid: string,
+  data: Record<string, unknown> | undefined,
+  fallbackPhone: string
+): CustomerUser {
+  const fullName =
+    typeof data?.fullName === 'string' && data.fullName.trim()
+      ? data.fullName.trim()
+      : typeof data?.name === 'string' && data.name.trim()
+      ? data.name.trim()
+      : fallbackPhone;
+
+  const phone =
+    typeof data?.phone === 'string' && data.phone.trim()
+      ? data.phone.trim()
+      : fallbackPhone;
+
+  const address = typeof data?.address === 'string' ? data.address : '';
+
+  const favoriteMenuIds = Array.isArray(data?.favoriteMenuIds)
+    ? data.favoriteMenuIds.filter((id): id is string => typeof id === 'string')
+    : [];
+
+  let createdAt = new Date().toISOString();
+  const rawCreated = data?.createdAt as { toDate?: () => Date } | string | undefined;
+  if (typeof rawCreated === 'string') {
+    createdAt = rawCreated;
+  } else if (rawCreated && typeof rawCreated.toDate === 'function') {
+    createdAt = rawCreated.toDate().toISOString();
+  }
+
+  return {
+    id: uid,
+    name: fullName,
+    phone,
+    address,
+    favoriteMenuIds,
+    createdAt,
+  };
+}
 
 export function useAuth() {
   const [customer, setCustomer] = useState<CustomerUser | null>(() => {
@@ -50,9 +153,13 @@ export function useAuth() {
     }
   }, []);
 
-  // Strictly verify Admin session via Firebase Authentication onAuthStateChanged
+  // Sync both Admin and Customer sessions via Firebase Authentication onAuthStateChanged
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    let active = true;
+
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (!active) return;
+
       if (firebaseUser) {
         if (isAdminEmail(firebaseUser.email)) {
           setAdminSession({
@@ -61,42 +168,110 @@ export function useAuth() {
             adminUsername: firebaseUser.email || '',
           });
           setFirebaseNonAdminEmail(null);
+          setCustomer(null);
+          try {
+            localStorage.removeItem(CUSTOMER_STORAGE_KEY);
+          } catch {
+            // ignore
+          }
           setAuthError(null);
         } else {
           setAdminSession(null);
           setFirebaseNonAdminEmail(firebaseUser.email || 'unknown');
+
+          // Load customer profile from Firestore users/{uid}
+          const fallbackPhone = extractPhoneFromSyntheticEmail(firebaseUser.email);
+          try {
+            const snap = await getDoc(doc(db, 'users', firebaseUser.uid));
+            if (!active) return;
+            if (snap.exists()) {
+              const loaded = parseCustomerFromDoc(
+                firebaseUser.uid,
+                snap.data() as Record<string, unknown>,
+                fallbackPhone
+              );
+              setCustomer(loaded);
+              try {
+                localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(loaded));
+              } catch {
+                // ignore
+              }
+            }
+          } catch (error) {
+            logFirestoreError(error, OperationType.GET, `users/${firebaseUser.uid}`);
+          }
         }
       } else {
         setAdminSession(null);
         setFirebaseNonAdminEmail(null);
+        setCustomer(null);
+        try {
+          localStorage.removeItem(CUSTOMER_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
       }
-      setAdminAuthReady(true);
+
+      if (active) {
+        setAdminAuthReady(true);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   const loginCustomer = useCallback(async (identifier: string, password: string): Promise<boolean> => {
     setAuthLoading(true);
     setAuthError(null);
+
+    const cleanPhone = normalizePhoneDigits(identifier);
+    if (cleanPhone.length < 6) {
+      setAuthError('يرجى إدخال رقم هاتف صحيح');
+      setAuthLoading(false);
+      return false;
+    }
+
+    const syntheticEmail = phoneToSyntheticEmail(cleanPhone);
+
     try {
-      const res = await fetch('/api/auth/customer/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'فشل تسجيل الدخول');
-        setAuthLoading(false);
-        return false;
+      const credential = await signInWithEmailAndPassword(auth, syntheticEmail, password);
+      const uid = credential.user.uid;
+
+      let loadedCustomer: CustomerUser = {
+        id: uid,
+        name: cleanPhone,
+        phone: cleanPhone,
+        address: '',
+        favoriteMenuIds: [],
+        createdAt: new Date().toISOString(),
+      };
+
+      try {
+        const snap = await getDoc(doc(db, 'users', uid));
+        if (snap.exists()) {
+          loadedCustomer = parseCustomerFromDoc(
+            uid,
+            snap.data() as Record<string, unknown>,
+            cleanPhone
+          );
+        }
+      } catch (profileErr) {
+        logFirestoreError(profileErr, OperationType.GET, `users/${uid}`);
       }
-      setCustomer(data.user);
-      localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(data.user));
+
+      setCustomer(loadedCustomer);
+      try {
+        localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(loadedCustomer));
+      } catch {
+        // ignore
+      }
       setAuthLoading(false);
       return true;
-    } catch {
-      setAuthError('حدث خطأ في الاتصال بالخادم');
+    } catch (err: unknown) {
+      setAuthError(formatCustomerAuthError(err));
       setAuthLoading(false);
       return false;
     }
@@ -111,29 +286,72 @@ export function useAuth() {
     }): Promise<boolean> => {
       setAuthLoading(true);
       setAuthError(null);
+
+      const trimmedName = payload.name.trim();
+      const cleanPhone = normalizePhoneDigits(payload.phone);
+      const trimmedAddress = payload.address.trim();
+
+      if (!trimmedName) {
+        setAuthError('يرجى إدخال الاسم الكامل');
+        setAuthLoading(false);
+        return false;
+      }
+
+      if (cleanPhone.length < 6) {
+        setAuthError('يرجى إدخال رقم هاتف صحيح');
+        setAuthLoading(false);
+        return false;
+      }
+
+      if (payload.password.length < 6) {
+        setAuthError('كلمة المرور يجب أن تكون 6 أحرف على الأقل');
+        setAuthLoading(false);
+        return false;
+      }
+
+      const syntheticEmail = phoneToSyntheticEmail(cleanPhone);
+
       try {
-        const res = await fetch('/api/auth/customer/signup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+        const credential = await createUserWithEmailAndPassword(
+          auth,
+          syntheticEmail,
+          payload.password
+        );
+        const uid = credential.user.uid;
+
+        await setDoc(doc(db, 'users', uid), {
+          fullName: trimmedName,
+          phone: cleanPhone,
+          address: trimmedAddress,
+          role: 'customer',
+          favoriteMenuIds: guestFavorites,
+          createdAt: serverTimestamp(),
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setAuthError(data.error || 'فشل إنشاء الحساب');
-          setAuthLoading(false);
-          return false;
+
+        const newCustomer: CustomerUser = {
+          id: uid,
+          name: trimmedName,
+          phone: cleanPhone,
+          address: trimmedAddress,
+          favoriteMenuIds: guestFavorites,
+          createdAt: new Date().toISOString(),
+        };
+
+        setCustomer(newCustomer);
+        try {
+          localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(newCustomer));
+        } catch {
+          // ignore
         }
-        setCustomer(data.user);
-        localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(data.user));
         setAuthLoading(false);
         return true;
-      } catch {
-        setAuthError('حدث خطأ في الاتصال بالخادم');
+      } catch (err: unknown) {
+        setAuthError(formatCustomerAuthError(err));
         setAuthLoading(false);
         return false;
       }
     },
-    []
+    [guestFavorites]
   );
 
   const updateCustomerProfile = useCallback(
@@ -146,29 +364,53 @@ export function useAuth() {
     }): Promise<boolean> => {
       setAuthLoading(true);
       setAuthError(null);
+
+      const uid = auth.currentUser?.uid || payload.id;
+      const trimmedName = payload.name.trim();
+      const cleanPhone = normalizePhoneDigits(payload.phone) || payload.phone.trim();
+      const trimmedAddress = payload.address.trim();
+
       try {
-        const res = await fetch('/api/auth/customer/profile', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setAuthError(data.error || 'فشل تحديث الحساب');
-          setAuthLoading(false);
-          return false;
+        const nextFavorites = payload.favoriteMenuIds ?? customer?.favoriteMenuIds ?? [];
+
+        await setDoc(
+          doc(db, 'users', uid),
+          {
+            fullName: trimmedName,
+            phone: cleanPhone,
+            address: trimmedAddress,
+            role: 'customer',
+            favoriteMenuIds: nextFavorites,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        const updatedCustomer: CustomerUser = {
+          id: uid,
+          name: trimmedName,
+          phone: cleanPhone,
+          address: trimmedAddress,
+          favoriteMenuIds: nextFavorites,
+          createdAt: customer?.createdAt || new Date().toISOString(),
+        };
+
+        setCustomer(updatedCustomer);
+        try {
+          localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(updatedCustomer));
+        } catch {
+          // ignore
         }
-        setCustomer(data.user);
-        localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(data.user));
         setAuthLoading(false);
         return true;
-      } catch {
-        setAuthError('حدث خطأ في الاتصال');
+      } catch (err: unknown) {
+        logFirestoreError(err, OperationType.WRITE, `users/${uid}`);
+        setAuthError(formatCustomerAuthError(err));
         setAuthLoading(false);
         return false;
       }
     },
-    []
+    [customer]
   );
 
   const toggleFavoriteDish = useCallback(
@@ -183,18 +425,29 @@ export function useAuth() {
           favoriteMenuIds: nextFavs,
         };
         setCustomer(updatedCustomer);
-        localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(updatedCustomer));
-        fetch('/api/auth/customer/profile', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: customer.id,
-            name: customer.name,
-            phone: customer.phone,
-            address: customer.address,
-            favoriteMenuIds: nextFavs,
-          }),
-        }).catch(() => {});
+        try {
+          localStorage.setItem(CUSTOMER_STORAGE_KEY, JSON.stringify(updatedCustomer));
+        } catch {
+          // ignore
+        }
+
+        const uid = auth.currentUser?.uid || customer.id;
+        if (uid) {
+          void setDoc(
+            doc(db, 'users', uid),
+            {
+              fullName: customer.name,
+              phone: customer.phone,
+              address: customer.address,
+              role: 'customer',
+              favoriteMenuIds: nextFavs,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          ).catch((error) => {
+            logFirestoreError(error, OperationType.WRITE, `users/${uid}`);
+          });
+        }
       } else {
         setGuestFavorites((prev) => {
           const next = prev.includes(menuItemId)
@@ -214,9 +467,21 @@ export function useAuth() {
 
   const favoriteIds = customer ? customer.favoriteMenuIds || [] : guestFavorites;
 
-  const logoutCustomer = useCallback(() => {
-    setCustomer(null);
-    localStorage.removeItem(CUSTOMER_STORAGE_KEY);
+  const logoutCustomer = useCallback(async () => {
+    try {
+      await signOut(auth);
+    } catch {
+      // ignore signOut errors
+    } finally {
+      setCustomer(null);
+      setFirebaseNonAdminEmail(null);
+      setAuthError(null);
+      try {
+        localStorage.removeItem(CUSTOMER_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    }
   }, []);
 
   const loginAdmin = useCallback(async (email: string, password: string): Promise<boolean> => {
@@ -225,7 +490,7 @@ export function useAuth() {
 
     const trimmedEmail = email.trim();
     if (!trimmedEmail || !password) {
-      setAuthError(INVALID_CREDENTIALS_ERROR_AR);
+      setAuthError(INVALID_ADMIN_CREDENTIALS_ERROR_AR);
       setAuthLoading(false);
       return false;
     }
@@ -251,17 +516,14 @@ export function useAuth() {
       setAuthLoading(false);
       return true;
     } catch (err: unknown) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code || '')
-          : '';
+      const { code } = getFirebaseErrorCodeAndMessage(err);
 
       if (code === 'auth/too-many-requests') {
         setAuthError('تم تجاوز عدد محاولات الدخول المسموح بها مؤقتاً. يرجى المحاولة بعد قليل.');
       } else if (code === 'auth/network-request-failed') {
         setAuthError('تعذر الاتصال بخدمة المصادقة. يرجى التحقق من الاتصال بالإنترنت.');
       } else {
-        setAuthError(INVALID_CREDENTIALS_ERROR_AR);
+        setAuthError(INVALID_ADMIN_CREDENTIALS_ERROR_AR);
       }
 
       setAdminSession(null);

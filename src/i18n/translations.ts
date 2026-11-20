@@ -386,8 +386,8 @@ export const TRANSLATIONS = {
         acknowledgeCancelBtn: 'تم الاطلاع',
         goToOrderBtn: 'عرض في الطلبات',
         cancelledByCustomerBadge: 'ملغي بواسطة العميل (خلال ١٥ دقيقة)',
-        exportCsvBtn: 'تصدير إلى CSV',
-        exportCsvSuccess: 'تم تصدير ملف CSV',
+        exportCsvBtn: 'تصدير إلى Excel',
+        exportCsvSuccess: 'تم تصدير ملف Excel',
       },
       statuses: {
         pending: 'جديد / بانتظار المراجعة',
@@ -779,8 +779,8 @@ export const TRANSLATIONS = {
         acknowledgeCancelBtn: 'Mark as Read',
         goToOrderBtn: 'View Order',
         cancelledByCustomerBadge: 'Cancelled by Customer (within 15 min)',
-        exportCsvBtn: 'Export to CSV',
-        exportCsvSuccess: 'CSV Exported',
+        exportCsvBtn: 'Export to Excel',
+        exportCsvSuccess: 'Excel Exported',
       },
       statuses: {
         pending: 'Pending Review',

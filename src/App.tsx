@@ -19,7 +19,7 @@ import { Footer } from './components/Footer.tsx';
 import { ScrollToTopButton } from './components/ScrollToTopButton.tsx';
 import { OfflineIndicator } from './components/OfflineIndicator.tsx';
 import { playOrderNotificationChime } from './utils/orderAlertSound.ts';
-import { exportOrdersToCsv } from './utils/exportOrdersCsv.ts';
+import { exportOrdersToExcel } from './utils/exportOrdersExcel.ts';
 
 const ACTIVE_BRANCH_KEY = 'saheb_elsaada_active_branch';
 const CART_STORAGE_KEY = 'saheb_elsaada_cart_v1';
@@ -428,12 +428,21 @@ export function App() {
             updateReservationStatus(adminBranch, id, status)
           }
           onDeleteReservation={(id) => deleteReservation(adminBranch, id)}
-          onUpdateOrderStatus={(id, status) => updateOrderStatus(adminBranch, id, status)}
+          onUpdateOrderStatus={(id, status, bId) =>
+            updateOrderStatus(bId || adminBranch, id, status)
+          }
           onAcknowledgeOrderCancellation={(branchId, orderId) =>
             acknowledgeOrderCancellation(branchId, orderId)
           }
-          onDeleteOrder={(id) => deleteOrder(adminBranch, id)}
-          onExportOrdersCsv={() => exportOrdersToCsv(adminStore.orders, adminBranchConfig, lang)}
+          onDeleteOrder={(id, bId) => deleteOrder(bId || adminBranch, id)}
+          onExportOrdersCsv={(ordersToExport) =>
+            exportOrdersToExcel(
+              ordersToExport || adminStore.orders,
+              adminBranchConfig,
+              lang,
+              effectiveBranchConfigs
+            )
+          }
           reviews={reviews}
           onDeleteReview={deleteReview}
           onResetDefaults={() => resetBranchDefaults(adminBranch)}
@@ -481,7 +490,10 @@ export function App() {
               branchConfig={activeBranchConfig}
               branchConfigs={effectiveBranchConfigs}
               reviews={reviews}
+              customerName={customer?.name}
+              isAdmin={Boolean(adminSession)}
               onAddReview={addReview}
+              onDeleteReview={deleteReview}
             />
 
             <LocationContact

@@ -38,6 +38,7 @@ import {
   XCircle,
   Volume2,
   VolumeX,
+  Calendar,
 } from 'lucide-react';
 import type {
   AuthSession,
@@ -70,7 +71,7 @@ import { PRESET_IMAGE_OPTIONS } from '../data/mediaAssets.ts';
 import { ResilientImage } from './ResilientImage.tsx';
 import { BranchAnalyticsPanel } from './BranchAnalyticsPanel.tsx';
 import { playOrderNotificationChime, unlockAudioContext } from '../utils/orderAlertSound.ts';
-import { exportOrdersToCsv } from '../utils/exportOrdersCsv.ts';
+import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
 
 interface AdminDashboardProps {
   lang: Lang;
@@ -108,12 +109,12 @@ interface AdminDashboardProps {
   onDeletePhoto: (id: string) => void;
   onUpdateReservationStatus: (id: string, status: BookingStatus) => void;
   onDeleteReservation: (id: string) => void;
-  onUpdateOrderStatus: (id: string, status: BookingStatus) => void;
+  onUpdateOrderStatus: (id: string, status: BookingStatus, branchId?: BranchId) => void;
   onAcknowledgeOrderCancellation?: (branchId: BranchId, orderId: string) => void;
-  onDeleteOrder: (id: string) => void;
-  onExportOrdersCsv?: () => boolean;
+  onDeleteOrder: (id: string, branchId?: BranchId) => void;
+  onExportOrdersCsv?: (ordersToExport?: OnlineOrder[]) => boolean;
   reviews: CustomerReview[];
-  onDeleteReview: (id: string) => void;
+  onDeleteReview: (id: string) => void | Promise<void>;
   onResetDefaults: () => void;
   onExitAdmin: () => void;
 }
@@ -257,6 +258,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setBranchSettingsSaved(false);
     setQrTargetUrl(getBranchMenuDriveUrl(adminBranch));
     setQrNotice(null);
+    setOrderBranchFilter(adminBranch);
   }, [adminBranch, branchConfig]);
 
   // New Order Web Audio Alert State (always declared above early return)
@@ -313,8 +315,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, [stores, adminSession, firestoreOrdersReady, orderSoundEnabled]);
 
-  // Menu Form & Reservations Filter State
+  // Menu Form, Orders & Reservations Filter State
   const [menuAdminSearch, setMenuAdminSearch] = useState('');
+  const [orderSearch, setOrderSearch] = useState('');
+  const [orderBranchFilter, setOrderBranchFilter] = useState<'all' | BranchId>(adminBranch);
+  const [orderDateFrom, setOrderDateFrom] = useState('');
+  const [orderDateTo, setOrderDateTo] = useState('');
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | BookingStatus>('all');
   const [reservationSearch, setReservationSearch] = useState('');
   const [reservationStatusFilter, setReservationStatusFilter] = useState<'all' | BookingStatus>('all');
   const [editingMenuId, setEditingMenuId] = useState<string | null>(null);
@@ -559,9 +566,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 type="button"
                 onClick={async () => {
                   if (customer && onLogoutCustomer) {
-                    onLogoutCustomer();
-                  }
-                  if (firebaseNonAdminEmail) {
+                    await onLogoutCustomer();
+                  } else if (firebaseNonAdminEmail) {
                     await onAdminLogout();
                   }
                 }}
@@ -964,6 +970,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       })
     : menu;
 
+  const scopedOrders: Array<OnlineOrder & { branchId: BranchId }> = (
+    orderBranchFilter === 'all'
+      ? BRANCH_ORDER.flatMap((bId) =>
+          (stores[bId]?.orders || []).map((o) => ({
+            ...o,
+            branchId: o.branchId || bId,
+          }))
+        )
+      : (stores[orderBranchFilter]?.orders || []).map((o) => ({
+          ...o,
+          branchId: o.branchId || orderBranchFilter,
+        }))
+  ).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const toLocalYmd = (iso: string): string => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+      d.getDate()
+    ).padStart(2, '0')}`;
+  };
+
+  const filteredOrders = scopedOrders.filter((o) => {
+    if (orderStatusFilter !== 'all' && o.status !== orderStatusFilter) return false;
+
+    if (orderDateFrom || orderDateTo) {
+      const orderYmd = toLocalYmd(o.createdAt);
+      if (!orderYmd) return false;
+      if (orderDateFrom && orderYmd < orderDateFrom) return false;
+      if (orderDateTo && orderYmd > orderDateTo) return false;
+    }
+
+    const q = orderSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      o.id.toLowerCase().includes(q) ||
+      o.customerName.toLowerCase().includes(q) ||
+      o.phone.toLowerCase().includes(q) ||
+      (o.address || '').toLowerCase().includes(q) ||
+      (o.notes || '').toLowerCase().includes(q) ||
+      o.items.some(
+        (item) =>
+          item.titleAr.toLowerCase().includes(q) ||
+          (item.titleEn || '').toLowerCase().includes(q)
+      )
+    );
+  });
+
+  const hasActiveOrderFilters =
+    orderSearch.trim() !== '' ||
+    orderDateFrom !== '' ||
+    orderDateTo !== '' ||
+    orderStatusFilter !== 'all' ||
+    orderBranchFilter !== adminBranch;
+
   const filteredReservations = reservations.filter((r) => {
     const matchesStatus =
       reservationStatusFilter === 'all' || r.status === reservationStatusFilter;
@@ -979,6 +1040,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const totalBookingsAndOrders = reservations.length + orders.length;
   const activeBranchLabel = lang === 'ar' ? branchConfig.shortNameAr : branchConfig.shortNameEn;
+  const orderScopeLabel =
+    orderBranchFilter === 'all'
+      ? lang === 'ar'
+        ? 'كل الفروع'
+        : 'All Branches'
+      : lang === 'ar'
+      ? branchConfigs[orderBranchFilter].shortNameAr
+      : branchConfigs[orderBranchFilter].shortNameEn;
 
   const unacknowledgedCancellations = BRANCH_ORDER.flatMap((bId) => {
     const bCfg = branchConfigs[bId];
@@ -2462,17 +2531,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {/* Online Orders Section */}
             <div className="space-y-4">
               <div className="border-b border-[#D4AF37]/25 pb-2.5 flex items-center justify-between gap-3 flex-wrap">
-                <h3 className="font-bold text-lg text-[#D4AF37]">
-                  {t.bookings.ordersTitle} — {activeBranchLabel} ({orders.length})
-                </h3>
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h3 className="font-bold text-lg text-[#D4AF37]">
+                    {t.bookings.ordersTitle} — {orderScopeLabel} ({filteredOrders.length})
+                  </h3>
+                  {hasActiveOrderFilters && (
+                    <span className="text-xs font-mono px-2.5 py-0.5 bg-[#1E1E1E] border border-[#D4AF37]/30 text-[#D4AF37]">
+                      {filteredOrders.length} / {scopedOrders.length}
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-2.5 flex-wrap">
                   <button
                     type="button"
-                    disabled={orders.length === 0}
+                    disabled={filteredOrders.length === 0}
                     onClick={() => {
                       const exported = onExportOrdersCsv
-                        ? onExportOrdersCsv()
-                        : exportOrdersToCsv(orders, branchConfig, lang);
+                        ? onExportOrdersCsv(filteredOrders)
+                        : exportOrdersToExcel(filteredOrders, branchConfig, lang, branchConfigs);
                       if (exported) {
                         setCsvExported(true);
                         window.setTimeout(() => setCsvExported(false), 2500);
@@ -2497,19 +2573,184 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </span>
                 </div>
               </div>
-              {orders.length === 0 ? (
+
+              {/* Orders Search, Branch & Date Range Filter Bar */}
+              <div className="bg-[#1E1E1E] border border-[#D4AF37]/30 p-3.5 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                  {/* Search Input */}
+                  <div className="md:col-span-4">
+                    <label className="block text-[11px] text-[#C9C1B1] mb-1 font-bold">
+                      {lang === 'ar'
+                        ? 'بحث (الاسم، الهاتف، رقم الطلب، الصنف)'
+                        : 'Search (Name, Phone, Order ID, Item)'}
+                    </label>
+                    <div className="relative">
+                      <Search
+                        className={`w-4 h-4 text-[#D4AF37] absolute top-1/2 -translate-y-1/2 pointer-events-none ${
+                          lang === 'ar' ? 'right-3' : 'left-3'
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <input
+                        type="search"
+                        value={orderSearch}
+                        onChange={(e) => setOrderSearch(e.target.value)}
+                        placeholder={
+                          lang === 'ar'
+                            ? 'ابحث في الطلبات...'
+                            : 'Search orders...'
+                        }
+                        className={`w-full py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] placeholder-[#9E9585] text-xs sm:text-sm focus:outline-none focus:border-[#D4AF37] ${
+                          lang === 'ar' ? 'pr-9 pl-3' : 'pl-9 pr-3'
+                        }`}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Branch Filter Dropdown */}
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-[#C9C1B1] mb-1 font-bold">
+                      {lang === 'ar' ? 'تصفية حسب الفرع' : 'Filter by Branch'}
+                    </label>
+                    <select
+                      value={orderBranchFilter}
+                      onChange={(e) => setOrderBranchFilter(e.target.value as 'all' | BranchId)}
+                      aria-label={lang === 'ar' ? 'تصفية الطلبات حسب الفرع' : 'Filter orders by branch'}
+                      className="w-full px-3 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-xs sm:text-sm font-semibold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+                    >
+                      <option value="all" className="bg-[#121212]">
+                        {lang === 'ar' ? 'كل الفروع' : 'All Branches'}
+                      </option>
+                      {BRANCH_ORDER.map((bId) => (
+                        <option key={`ord-branch-filter-${bId}`} value={bId} className="bg-[#121212]">
+                          {lang === 'ar'
+                            ? branchConfigs[bId].shortNameAr
+                            : branchConfigs[bId].shortNameEn}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Date From */}
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-[#C9C1B1] mb-1 font-bold flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-[#D4AF37]" />
+                      <span>{lang === 'ar' ? 'من تاريخ' : 'From Date'}</span>
+                    </label>
+                    <input
+                      type="date"
+                      dir="ltr"
+                      value={orderDateFrom}
+                      onChange={(e) => setOrderDateFrom(e.target.value)}
+                      className="w-full px-2.5 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-xs focus:outline-none focus:border-[#D4AF37] [color-scheme:dark]"
+                    />
+                  </div>
+
+                  {/* Date To */}
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-[#C9C1B1] mb-1 font-bold flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-[#D4AF37]" />
+                      <span>{lang === 'ar' ? 'إلى تاريخ' : 'To Date'}</span>
+                    </label>
+                    <input
+                      type="date"
+                      dir="ltr"
+                      value={orderDateTo}
+                      onChange={(e) => setOrderDateTo(e.target.value)}
+                      className="w-full px-2.5 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-xs focus:outline-none focus:border-[#D4AF37] [color-scheme:dark]"
+                    />
+                  </div>
+
+                  {/* Status Filter */}
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] text-[#C9C1B1] mb-1 font-bold">
+                      {lang === 'ar' ? 'حالة الطلب' : 'Status'}
+                    </label>
+                    <select
+                      value={orderStatusFilter}
+                      onChange={(e) =>
+                        setOrderStatusFilter(e.target.value as 'all' | BookingStatus)
+                      }
+                      aria-label={lang === 'ar' ? 'تصفية الطلبات حسب الحالة' : 'Filter orders by status'}
+                      className="w-full px-3 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-xs sm:text-sm font-semibold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
+                    >
+                      <option value="all" className="bg-[#121212]">
+                        {lang === 'ar' ? 'كل الحالات' : 'All Statuses'}
+                      </option>
+                      {(
+                        [
+                          'pending',
+                          'preparing',
+                          'confirmed',
+                          'completed',
+                          'cancelled',
+                        ] as BookingStatus[]
+                      ).map((st) => (
+                        <option key={`ord-st-filter-${st}`} value={st} className="bg-[#121212]">
+                          {t.statuses[st]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {hasActiveOrderFilters && (
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-[#D4AF37]/15 flex-wrap">
+                    <span className="text-[11px] text-[#C9C1B1]">
+                      {lang === 'ar'
+                        ? `عرض ${filteredOrders.length} طلب من أصل ${scopedOrders.length}`
+                        : `Showing ${filteredOrders.length} of ${scopedOrders.length} orders`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOrderSearch('');
+                        setOrderBranchFilter(adminBranch);
+                        setOrderDateFrom('');
+                        setOrderDateTo('');
+                        setOrderStatusFilter('all');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1 bg-[#121212] border border-[#D4AF37]/35 hover:border-[#D4AF37] text-[#D4AF37] text-xs font-bold cursor-pointer transition-colors"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>{lang === 'ar' ? 'إعادة ضبط الفلاتر' : 'Reset Filters'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {filteredOrders.length === 0 ? (
                 <div className="bg-[#1E1E1E] border border-[#D4AF37]/25 p-8 text-center text-[#9E9585] text-sm">
-                  {t.bookings.emptyOrders}
+                  {hasActiveOrderFilters
+                    ? lang === 'ar'
+                      ? 'لا توجد طلبات مطابقة لمعايير البحث أو التاريخ المحدد.'
+                      : 'No orders match your current search or date/branch filters.'
+                    : t.bookings.emptyOrders}
                 </div>
               ) : (
-                orders.map((o) => {
+                filteredOrders.map((o) => {
+                  const orderBranchId = o.branchId || adminBranch;
+                  const orderBranchCfg = branchConfigs[orderBranchId] || branchConfig;
+                  const orderBranchName =
+                    lang === 'ar' ? orderBranchCfg.shortNameAr : orderBranchCfg.shortNameEn;
+                  const orderDateFormatted = (() => {
+                    const d = new Date(o.createdAt);
+                    if (Number.isNaN(d.getTime())) return o.createdAt;
+                    return d.toLocaleString(lang === 'ar' ? 'ar-EG' : 'en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    });
+                  })();
                   const isCustomerCancelled =
                     o.status === 'cancelled' && o.cancelledBy === 'customer';
                   const isUnreadCancel =
                     isCustomerCancelled && !o.adminCancelAcknowledged;
                   return (
                   <div
-                    key={o.id}
+                    key={`${orderBranchId}-${o.id}`}
                     className={`border p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 ${
                       isUnreadCancel
                         ? 'bg-red-950/30 border-2 border-red-500 shadow-lg'
@@ -2523,6 +2764,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <span className="px-2.5 py-0.5 bg-[#D4AF37] text-[#121212] font-bold text-xs font-mono">
                           {o.id}
                         </span>
+                        <span className="px-2 py-0.5 bg-[#121212] border border-[#D4AF37]/40 text-[#D4AF37] text-[11px] font-bold">
+                          {orderBranchName}
+                        </span>
                         <span className="font-bold text-[#F7F3E9] text-base">
                           {o.customerName}
                         </span>
@@ -2533,6 +2777,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         >
                           {o.phone}
                         </a>
+                        <span className="text-[11px] text-[#9E9585] inline-flex items-center gap-1">
+                          <Calendar className="w-3 h-3 text-[#D4AF37]/70" />
+                          <span>{orderDateFormatted}</span>
+                        </span>
 
                         {/* Payment Status Badge */}
                         <span
@@ -2574,7 +2822,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {isUnreadCancel && onAcknowledgeOrderCancellation && (
                             <button
                               type="button"
-                              onClick={() => onAcknowledgeOrderCancellation(adminBranch, o.id)}
+                              onClick={() => onAcknowledgeOrderCancellation(orderBranchId, o.id)}
                               className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer"
                             >
                               <Check className="w-3 h-3" />
@@ -2614,7 +2862,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <button
                             key={st}
                             type="button"
-                            onClick={() => onUpdateOrderStatus(o.id, st)}
+                            onClick={() => onUpdateOrderStatus(o.id, st, orderBranchId)}
                             className={`px-3 py-1.5 text-xs font-bold border transition-colors cursor-pointer flex items-center gap-1 ${
                               active
                                 ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'
@@ -2629,7 +2877,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => setConfirmDeleteOrder(o)}
+                        onClick={() => setConfirmDeleteOrder({ ...o, branchId: orderBranchId })}
                         title={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
                         aria-label={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
                         className="p-2 bg-[#121212] border border-red-500/40 text-red-400 hover:bg-red-500 hover:text-white cursor-pointer transition-colors"
@@ -3420,7 +3668,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  onDeleteOrder(confirmDeleteOrder.id);
+                  onDeleteOrder(confirmDeleteOrder.id, confirmDeleteOrder.branchId);
                   setConfirmDeleteOrder(null);
                 }}
                 className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"

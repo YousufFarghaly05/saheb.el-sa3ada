@@ -39,8 +39,6 @@ const VALID_BRANCH_IDS: BranchId[] = ['branch_tagamoa', 'branch_moez', 'branch_z
 const STORE_BROADCAST_CHANNEL = 'saheb_elsaada_store_sync_v1';
 export const ORDER_CANCEL_WINDOW_MS = 15 * 60 * 1000;
 
-export const LIVE_REVIEWS_STORAGE_KEY = 'saheb_elsaada_live_reviews_v1';
-
 function isBranchId(value: unknown): value is BranchId {
   return value === 'branch_tagamoa' || value === 'branch_moez' || value === 'branch_zayed';
 }
@@ -61,33 +59,40 @@ function stripUndefinedDeep<T>(value: T): T {
   return value;
 }
 
-function readLiveReviewsFromStorage(): CustomerReview[] {
-  try {
-    const raw = localStorage.getItem(LIVE_REVIEWS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (r): r is CustomerReview =>
-        Boolean(
-          r &&
-            typeof r === 'object' &&
-            typeof r.id === 'string' &&
-            typeof r.author === 'string' &&
-            typeof r.comment === 'string'
-        )
-    );
-  } catch {
-    return [];
-  }
-}
+function parseFirestoreReview(
+  docId: string,
+  data: Record<string, unknown>
+): CustomerReview | null {
+  const rawComment = typeof data.comment === 'string' ? data.comment.trim() : '';
+  if (!rawComment) return null;
 
-function writeLiveReviewsToStorage(reviews: CustomerReview[]) {
-  try {
-    localStorage.setItem(LIVE_REVIEWS_STORAGE_KEY, JSON.stringify(reviews));
-  } catch {
-    // ignore storage quota errors
+  const rawAuthor =
+    typeof data.authorName === 'string' && data.authorName.trim()
+      ? data.authorName.trim()
+      : typeof data.author === 'string' && data.author.trim()
+      ? data.author.trim()
+      : 'عميل صاحب السعادة';
+
+  const branchId: BranchId = isBranchId(data.branchId) ? data.branchId : 'branch_tagamoa';
+  const rawRating = Number(data.rating);
+  const rating = Number.isFinite(rawRating) ? Math.min(5, Math.max(1, Math.round(rawRating))) : 5;
+
+  let createdAt = new Date().toISOString();
+  const rawCreated = data.createdAt as { toDate?: () => Date } | string | null | undefined;
+  if (typeof rawCreated === 'string' && rawCreated.trim()) {
+    createdAt = rawCreated;
+  } else if (rawCreated && typeof rawCreated === 'object' && typeof rawCreated.toDate === 'function') {
+    createdAt = rawCreated.toDate().toISOString();
   }
+
+  return {
+    id: docId,
+    author: rawAuthor,
+    branchId,
+    rating,
+    comment: rawComment,
+    createdAt,
+  };
 }
 
 const CATALOG_VERSION_KEY = 'saheb_elsaada_menu_catalog_v3';
@@ -1126,42 +1131,90 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
     [persistBranch, stores]
   );
 
-  const [reviews, setReviews] = useState<CustomerReview[]>(() => readLiveReviewsFromStorage());
+  const [reviews, setReviews] = useState<CustomerReview[]>([]);
 
+  // --- Cloud Firestore Real-Time Reviews Listener (Synced Across All Devices) ---
   useEffect(() => {
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === LIVE_REVIEWS_STORAGE_KEY) {
-        setReviews(readLiveReviewsFromStorage());
+    // Remove obsolete local-only reviews storage key if present
+    try {
+      localStorage.removeItem('saheb_elsaada_live_reviews_v1');
+    } catch {
+      // ignore storage errors
+    }
+
+    const reviewsQuery = query(collection(db, 'reviews'), orderBy('createdAt', 'desc'));
+    const unsubReviews = onSnapshot(
+      reviewsQuery,
+      (snapshot) => {
+        const liveReviews: CustomerReview[] = [];
+        snapshot.forEach((docSnap) => {
+          const parsed = parseFirestoreReview(
+            docSnap.id,
+            docSnap.data() as Record<string, unknown>
+          );
+          if (parsed) {
+            liveReviews.push(parsed);
+          }
+        });
+        setReviews(liveReviews);
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'reviews');
       }
-    };
-    window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
+    );
+
+    return () => unsubReviews();
   }, []);
 
   const addReview = useCallback(
-    (entry: Omit<CustomerReview, 'id' | 'createdAt'>): CustomerReview => {
-      const created: CustomerReview = {
-        ...entry,
-        id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        createdAt: new Date().toISOString(),
-      };
-      setReviews((prev) => {
-        const next = [created, ...prev];
-        writeLiveReviewsToStorage(next);
-        return next;
-      });
-      return created;
+    async (
+      entry: Omit<CustomerReview, 'id' | 'createdAt'>
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const cleanAuthor = entry.author.trim();
+      const cleanComment = entry.comment.trim();
+      const clampedRating = Math.min(5, Math.max(1, Math.round(Number(entry.rating) || 5)));
+      const validBranchId: BranchId = isBranchId(entry.branchId)
+        ? entry.branchId
+        : 'branch_tagamoa';
+
+      if (!cleanAuthor || !cleanComment) {
+        return {
+          ok: false,
+          error: 'يرجى كتابة الاسم والتعليق قبل نشر التقييم.',
+        };
+      }
+
+      try {
+        await addDoc(collection(db, 'reviews'), {
+          authorName: cleanAuthor,
+          comment: cleanComment,
+          rating: clampedRating,
+          branchId: validBranchId,
+          createdAt: serverTimestamp(),
+        });
+        return { ok: true };
+      } catch (error) {
+        logFirestoreError(error, OperationType.CREATE, 'reviews');
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : 'خطأ في الاتصال بقاعدة البيانات';
+        return {
+          ok: false,
+          error: `تعذر نشر التقييم حالياً، يرجى المحاولة مرة أخرى (${message})`,
+        };
+      }
     },
     []
   );
 
-  const deleteReview = useCallback((id: string) => {
+  const deleteReview = useCallback(async (id: string) => {
     if (!isAdminEmail(auth.currentUser?.email)) return;
-    setReviews((prev) => {
-      const next = prev.filter((r) => r.id !== id);
-      writeLiveReviewsToStorage(next);
-      return next;
-    });
+    try {
+      await deleteDoc(doc(db, 'reviews', id));
+    } catch (error) {
+      logFirestoreError(error, OperationType.DELETE, `reviews/${id}`);
+    }
   }, []);
 
   const resetBranchDefaults = useCallback(
