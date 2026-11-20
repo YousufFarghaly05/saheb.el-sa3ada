@@ -18,6 +18,7 @@ import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { Footer } from './components/Footer.tsx';
 import { ScrollToTopButton } from './components/ScrollToTopButton.tsx';
 import { OfflineIndicator } from './components/OfflineIndicator.tsx';
+import { playOrderNotificationChime } from './utils/orderAlertSound.ts';
 
 const ACTIVE_BRANCH_KEY = 'saheb_elsaada_active_branch';
 const CART_STORAGE_KEY = 'saheb_elsaada_cart_v1';
@@ -519,7 +520,11 @@ export function App() {
         onClearCart={handleClearCart}
         onSubmitReservation={(entry) => addReservation(activeBranch, entry)}
         onReservationSuccess={(payload) => setBookingSuccess(payload)}
-        onSubmitOrder={(entry) => addOrder(activeBranch, entry)}
+        onSubmitOrder={(entry) => {
+          const created = addOrder(activeBranch, entry);
+          playOrderNotificationChime();
+          return created;
+        }}
       />
 
       <BookingSuccessModal

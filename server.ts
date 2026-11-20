@@ -5,7 +5,6 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
 import { INITIAL_BRANCH_STORES } from './src/data/initialData';
 
 dotenv.config();
@@ -69,7 +68,7 @@ function ensureUsersDb(): UsersDb {
     const initialUsers: UsersDb = {
       admin: {
         username: 'admin',
-        passwordHash: hashPassword('123456'),
+        passwordHash: hashPassword('admin123'),
         role: 'admin',
       },
       customers: [
@@ -94,7 +93,7 @@ function ensureUsersDb(): UsersDb {
     if (!parsed.admin || parsed.admin.username !== 'admin') {
       parsed.admin = {
         username: 'admin',
-        passwordHash: hashPassword('123456'),
+        passwordHash: hashPassword('admin123'),
         role: 'admin',
       };
       fs.writeFileSync(USERS_FILE, JSON.stringify(parsed, null, 2), 'utf-8');
@@ -104,7 +103,7 @@ function ensureUsersDb(): UsersDb {
     return {
       admin: {
         username: 'admin',
-        passwordHash: hashPassword('123456'),
+        passwordHash: hashPassword('admin123'),
         role: 'admin',
       },
       customers: [],
@@ -383,7 +382,7 @@ async function startServer() {
     const cleanUser = String(username).trim().toLowerCase();
     const passHash = hashPassword(String(password));
 
-    const isDefaultAdmin = cleanUser === 'admin' && String(password) === '123456';
+    const isDefaultAdmin = cleanUser === 'admin' && String(password) === 'admin123';
     const isStoredAdmin =
       cleanUser === db.admin.username.toLowerCase() && passHash === db.admin.passwordHash;
 
@@ -441,67 +440,6 @@ async function startServer() {
       res.json({ url: `/uploads/${outName}` });
     } catch {
       res.status(500).json({ error: 'Failed to save uploaded image' });
-    }
-  });
-
-  app.post('/api/transcribe-voice-note', async (req, res) => {
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server.' });
-        return;
-      }
-
-      const { audioBase64, mimeType, lang } = req.body || {};
-      if (typeof audioBase64 !== 'string' || !audioBase64.trim()) {
-        res.status(400).json({ error: 'Missing recorded audio payload.' });
-        return;
-      }
-
-      const cleanMimeType =
-        typeof mimeType === 'string' && mimeType.startsWith('audio/')
-          ? mimeType.split(';')[0]
-          : 'audio/webm';
-
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
-
-      const instruction =
-        lang === 'ar'
-          ? 'انسخ هذا التسجيل الصوتي بدقة باللغة العربية (أو الإنجليزية إذا كان المتحدث يتحدث بالإنجليزية) كنص واضح لملاحظات حجز مطعم ومناسبة خاصة بدون أي مقدمات أو تعليقات إضافية.'
-          : 'Transcribe this customer voice note for a restaurant reservation special request accurately in the spoken language (Arabic or English). Output only the transcribed text with no extra commentary.';
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.5-transcribe',
-        contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: cleanMimeType,
-                data: audioBase64,
-              },
-            },
-            { text: instruction },
-          ],
-        },
-      });
-
-      const transcript = (response.text ?? '').trim();
-      if (!transcript) {
-        res.status(422).json({ error: 'No speech could be transcribed from the recording.' });
-        return;
-      }
-
-      res.json({ transcript });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to transcribe audio note.';
-      res.status(500).json({ error: message });
     }
   });
 

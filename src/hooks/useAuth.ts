@@ -3,8 +3,13 @@ import type { CustomerUser, AuthSession } from '../types.ts';
 
 const CUSTOMER_STORAGE_KEY = 'saheb_elsaada_customer_session_v2';
 const ADMIN_STORAGE_KEY = 'saheb_elsaada_admin_session_v2';
-const ADMIN_CREDENTIALS_KEY = 'saheb_elsaada_admin_credentials_v1';
+const ADMIN_CREDENTIALS_KEY = 'saheb_elsaada_admin_credentials_v2';
 const GUEST_FAVORITES_KEY = 'saheb_elsaada_guest_favorites_v1';
+
+const DEFAULT_ADMIN_CREDENTIALS: StoredAdminCredentials = {
+  username: 'admin',
+  password: 'admin123',
+};
 
 interface StoredAdminCredentials {
   username: string;
@@ -203,59 +208,28 @@ export function useAuth() {
     setAuthLoading(true);
     setAuthError(null);
 
-    const customCreds = getStoredAdminCredentials();
+    const activeCreds = getStoredAdminCredentials() ?? DEFAULT_ADMIN_CREDENTIALS;
     const inputUser = username.trim().toLowerCase();
 
-    // If owner saved custom credentials in localStorage, validate strictly against them
-    if (customCreds) {
-      if (inputUser === customCreds.username.toLowerCase() && password === customCreds.password) {
-        const session: AuthSession = {
-          token: `local-owner-${Date.now()}`,
-          role: 'admin',
-          adminUsername: customCreds.username,
-        };
-        setAdminSession(session);
+    if (inputUser === activeCreds.username.toLowerCase() && password === activeCreds.password) {
+      const session: AuthSession = {
+        token: `local-admin-${Date.now()}`,
+        role: 'admin',
+        adminUsername: activeCreds.username,
+      };
+      setAdminSession(session);
+      try {
         localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(session));
-        setAuthLoading(false);
-        return true;
+      } catch {
+        // ignore storage quota errors
       }
-      setAuthError('بيانات دخول الإدارة غير صحيحة');
-      setAuthLoading(false);
-      return false;
-    }
-
-    try {
-      const res = await fetch('/api/auth/admin/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'بيانات دخول الإدارة غير صحيحة');
-        setAuthLoading(false);
-        return false;
-      }
-      setAdminSession(data.session);
-      localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(data.session));
       setAuthLoading(false);
       return true;
-    } catch {
-      if (inputUser === 'admin' && password === '123456') {
-        const fallbackSession: AuthSession = {
-          token: 'local-owner-token',
-          role: 'admin',
-          adminUsername: 'admin',
-        };
-        setAdminSession(fallbackSession);
-        localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(fallbackSession));
-        setAuthLoading(false);
-        return true;
-      }
-      setAuthError('حدث خطأ في الاتصال بالخادم');
-      setAuthLoading(false);
-      return false;
     }
+
+    setAuthError('بيانات دخول الإدارة غير صحيحة');
+    setAuthLoading(false);
+    return false;
   }, []);
 
   const updateAdminCredentials = useCallback(
@@ -264,7 +238,7 @@ export function useAuth() {
       newUsername: string;
       newPassword: string;
     }): { ok: boolean; error?: string } => {
-      const existing = getStoredAdminCredentials() ?? { username: 'admin', password: '123456' };
+      const existing = getStoredAdminCredentials() ?? DEFAULT_ADMIN_CREDENTIALS;
       if (payload.currentPassword !== existing.password) {
         return {
           ok: false,

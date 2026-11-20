@@ -38,6 +38,8 @@ import {
   Bell,
   AlertTriangle,
   XCircle,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import type {
   AuthSession,
@@ -68,6 +70,7 @@ import { getTranslations } from '../i18n/translations.ts';
 import { PRESET_IMAGE_OPTIONS } from '../data/mediaAssets.ts';
 import { ResilientImage } from './ResilientImage.tsx';
 import { BranchAnalyticsPanel } from './BranchAnalyticsPanel.tsx';
+import { playOrderNotificationChime, unlockAudioContext } from '../utils/orderAlertSound.ts';
 
 interface AdminDashboardProps {
   lang: Lang;
@@ -256,6 +259,54 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setQrNotice(null);
   }, [adminBranch, branchConfig]);
 
+  // New Order Web Audio Alert State (always declared above early return)
+  const [orderSoundEnabled, setOrderSoundEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('saheb_elsaada_order_sound_v1');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [incomingOrderAlerts, setIncomingOrderAlerts] = useState<
+    Array<{ branchId: BranchId; order: OnlineOrder }>
+  >([]);
+  const seenOrderIdsRef = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('saheb_elsaada_order_sound_v1', String(orderSoundEnabled));
+    } catch {
+      // ignore storage errors
+    }
+  }, [orderSoundEnabled]);
+
+  useEffect(() => {
+    const allOrders: Array<{ branchId: BranchId; order: OnlineOrder }> = [];
+    BRANCH_ORDER.forEach((bId) => {
+      (stores[bId]?.orders || []).forEach((order) => {
+        allOrders.push({ branchId: bId, order });
+      });
+    });
+
+    if (seenOrderIdsRef.current === null) {
+      seenOrderIdsRef.current = new Set(allOrders.map((entry) => entry.order.id));
+      return;
+    }
+
+    const newlyArrived = allOrders.filter(
+      (entry) => !seenOrderIdsRef.current!.has(entry.order.id)
+    );
+
+    if (newlyArrived.length > 0) {
+      newlyArrived.forEach((entry) => seenOrderIdsRef.current!.add(entry.order.id));
+      setIncomingOrderAlerts((prev) => [...newlyArrived, ...prev].slice(0, 6));
+      if (adminSession && orderSoundEnabled) {
+        playOrderNotificationChime();
+      }
+    }
+  }, [stores, adminSession, orderSoundEnabled]);
+
   // Menu Form & Reservations Filter State
   const [menuAdminSearch, setMenuAdminSearch] = useState('');
   const [reservationSearch, setReservationSearch] = useState('');
@@ -439,6 +490,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    unlockAudioContext();
     await onAdminLogin(username, password);
   };
 
@@ -498,7 +550,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 type="button"
                 onClick={() => {
                   setUsername('admin');
-                  setPassword('123456');
+                  setPassword('admin123');
                 }}
                 className="px-2 py-1 bg-[#D4AF37]/20 border border-[#D4AF37]/40 text-[#F7F3E9] font-bold cursor-pointer shrink-0"
               >
@@ -649,6 +701,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         bandTime: sBandTime,
         noteAr: sNoteAr,
         noteEn: sNoteAr,
+        imageUrl:
+          'https://images.unsplash.com/photo-1555939594-58d7cb561ad1?auto=format&fit=crop&w=800&q=75',
         active: true,
       });
     }
@@ -926,6 +980,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
+              onClick={() => {
+                unlockAudioContext();
+                setOrderSoundEnabled((prev) => {
+                  const next = !prev;
+                  if (next) playOrderNotificationChime();
+                  return next;
+                });
+              }}
+              className={`px-3.5 py-2.5 border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                orderSoundEnabled
+                  ? 'bg-[#10B981]/15 border-[#10B981]/60 text-[#10B981] hover:bg-[#10B981]/25'
+                  : 'bg-[#121212] border-[#D4AF37]/30 text-[#9E9585] hover:text-[#F7F3E9]'
+              }`}
+            >
+              {orderSoundEnabled ? (
+                <Volume2 className="w-4 h-4 shrink-0" />
+              ) : (
+                <VolumeX className="w-4 h-4 shrink-0" />
+              )}
+              <span>
+                {orderSoundEnabled
+                  ? lang === 'ar'
+                    ? 'صوت الطلبات: مفعّل'
+                    : 'Order Alert: ON'
+                  : lang === 'ar'
+                  ? 'صوت الطلبات: صامت'
+                  : 'Order Alert: Muted'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                unlockAudioContext();
+                playOrderNotificationChime();
+              }}
+              className="px-3.5 py-2.5 bg-[#121212] hover:bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Bell className="w-3.5 h-3.5 shrink-0" />
+              <span>{lang === 'ar' ? 'اختبار الصوت' : 'Test Sound'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={onExitAdmin}
               className="px-4 py-2.5 bg-[#121212] hover:bg-[#D4AF37]/15 text-[#D4AF37] border border-[#D4AF37]/40 text-xs font-bold transition-colors cursor-pointer"
             >
@@ -1061,6 +1159,80 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             })}
           </div>
         </div>
+
+        {/* LIVE NEW ORDER AUDIO ALERT BANNER */}
+        {incomingOrderAlerts.length > 0 && (
+          <div
+            role="status"
+            className="bg-[#231D11] border-2 border-[#D4AF37] p-4 sm:p-5 mb-6 space-y-3 shadow-xl"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#D4AF37]/30 pb-2.5">
+              <div className="flex items-center gap-2.5 text-[#D4AF37]">
+                <span className="p-2 bg-[#D4AF37] text-[#121212] shrink-0 animate-pulse">
+                  <Bell className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm sm:text-base font-bold text-[#F7F3E9]">
+                    {lang === 'ar'
+                      ? `طلب جديد وارد (${incomingOrderAlerts.length})`
+                      : `New Incoming Order (${incomingOrderAlerts.length})`}
+                  </h2>
+                  <p className="text-xs text-[#C9C1B1]">
+                    {lang === 'ar'
+                      ? 'تم تشغيل التنبيه الصوتي فور استلام الطلب'
+                      : 'Audio chime triggered upon order receipt'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIncomingOrderAlerts([])}
+                className="px-3 py-1.5 bg-[#121212] border border-[#D4AF37]/40 text-xs font-bold text-[#C9C1B1] hover:text-[#F7F3E9] cursor-pointer"
+              >
+                {lang === 'ar' ? 'إخفاء التنبيه' : 'Dismiss'}
+              </button>
+            </div>
+            <div className="space-y-2">
+              {incomingOrderAlerts.map(({ branchId, order }) => {
+                const cfg = branchConfigs[branchId];
+                return (
+                  <div
+                    key={`new-ord-${order.id}`}
+                    className="flex flex-wrap items-center justify-between gap-3 bg-[#121212]/90 border border-[#D4AF37]/30 px-3.5 py-2.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2 py-0.5 bg-[#D4AF37] text-[#121212] font-mono font-bold">
+                        {order.id}
+                      </span>
+                      <span className="font-bold text-[#F7F3E9]">{order.customerName}</span>
+                      <span className="text-[#D4AF37] font-bold">
+                        {lang === 'ar' ? cfg.shortNameAr : cfg.shortNameEn}
+                      </span>
+                      <span className="text-[#10B981] font-mono font-bold">
+                        {order.totalAmount} {lang === 'ar' ? 'ج.م' : 'EGP'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (branchId !== adminBranch) {
+                          handleSelectAdminBranch(branchId);
+                        }
+                        setActiveTab('bookings');
+                        setIncomingOrderAlerts((prev) =>
+                          prev.filter((item) => item.order.id !== order.id)
+                        );
+                      }}
+                      className="px-3 py-1.5 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold cursor-pointer"
+                    >
+                      {lang === 'ar' ? 'عرض الطلب' : 'View Order'}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* CUSTOMER ORDER CANCELLATION MANAGEMENT ALERTS */}
         {unacknowledgedCancellations.length > 0 && (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Trash2,
@@ -13,9 +13,6 @@ import {
   Smartphone,
   MapPin,
   Megaphone,
-  Mic,
-  Square,
-  Loader2,
 } from 'lucide-react';
 import type {
   BranchConfig,
@@ -96,50 +93,12 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   const [submittedRefId, setSubmittedRefId] = useState<string | null>(null);
   const [submittedPaymentSummary, setSubmittedPaymentSummary] = useState<string>('');
 
-  // Voice-to-Text recording state for special requests
-  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
-  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
-  const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [voiceAddedNotice, setVoiceAddedNotice] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const recordingTimerRef = useRef<number | null>(null);
-
-  const stopAudioStreamAndTimer = () => {
-    if (recordingTimerRef.current !== null) {
-      window.clearInterval(recordingTimerRef.current);
-      recordingTimerRef.current = null;
-    }
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-  };
-
   useEffect(() => {
     setActiveTab(initialTab);
     setSubmittedWhatsAppUrl(null);
     setSubmittedRefId(null);
     setValidationError(null);
-    setVoiceError(null);
-    setVoiceAddedNotice(false);
-    if (!isOpen && mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
-      setIsRecordingVoice(false);
-      stopAudioStreamAndTimer();
-    }
   }, [initialTab, isOpen, branchConfig.id]);
-
-  useEffect(() => {
-    return () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
-      stopAudioStreamAndTimer();
-    };
-  }, []);
 
   useEffect(() => {
     if (customer) {
@@ -150,129 +109,6 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   }, [customer, isOpen]);
 
   if (!isOpen) return null;
-
-  const formatTimer = (secs: number) => {
-    const mins = Math.floor(secs / 60);
-    const rem = secs % 60;
-    return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
-  };
-
-  const transcribeAudioBlob = async (blob: Blob, mimeType: string) => {
-    setIsTranscribingVoice(true);
-    setVoiceError(null);
-    try {
-      const base64Audio = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const result = typeof reader.result === 'string' ? reader.result : '';
-          const commaIdx = result.indexOf(',');
-          resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
-        };
-        reader.onerror = () => reject(new Error('Failed to read recorded audio.'));
-        reader.readAsDataURL(blob);
-      });
-
-      const response = await fetch('/api/transcribe-voice-note', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          audioBase64: base64Audio,
-          mimeType,
-          lang,
-        }),
-      });
-
-      const payload = (await response.json().catch(() => ({}))) as {
-        transcript?: string;
-        error?: string;
-      };
-
-      if (!response.ok || !payload.transcript) {
-        throw new Error(payload.error || t.voiceTranscribeFailedError);
-      }
-
-      const transcriptText = payload.transcript.trim();
-      if (transcriptText) {
-        setNotes((prev) => (prev.trim() ? `${prev.trim()} — ${transcriptText}` : transcriptText));
-        setVoiceAddedNotice(true);
-        setTimeout(() => setVoiceAddedNotice(false), 3500);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : t.voiceTranscribeFailedError;
-      setVoiceError(message);
-    } finally {
-      setIsTranscribingVoice(false);
-    }
-  };
-
-  const handleToggleVoiceRecording = async () => {
-    if (isRecordingVoice) {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop();
-      }
-      setIsRecordingVoice(false);
-      stopAudioStreamAndTimer();
-      return;
-    }
-
-    setVoiceError(null);
-    setVoiceAddedNotice(false);
-
-    if (
-      typeof navigator === 'undefined' ||
-      !navigator.mediaDevices?.getUserMedia ||
-      typeof MediaRecorder === 'undefined'
-    ) {
-      setVoiceError(t.voiceUnsupportedError);
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-
-      const preferredTypes = [
-        'audio/webm;codecs=opus',
-        'audio/webm',
-        'audio/mp4',
-        'audio/ogg;codecs=opus',
-      ];
-      const chosenType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type));
-      const recorder = chosenType
-        ? new MediaRecorder(stream, { mimeType: chosenType })
-        : new MediaRecorder(stream);
-
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-      setRecordingSeconds(0);
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        stopAudioStreamAndTimer();
-        const mimeType = recorder.mimeType || chosenType || 'audio/webm';
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        audioChunksRef.current = [];
-        if (audioBlob.size > 0) {
-          void transcribeAudioBlob(audioBlob, mimeType);
-        }
-      };
-
-      recorder.start();
-      setIsRecordingVoice(true);
-      recordingTimerRef.current = window.setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
-      }, 1000);
-    } catch {
-      stopAudioStreamAndTimer();
-      setIsRecordingVoice(false);
-      setVoiceError(t.voiceMicDeniedError);
-    }
-  };
 
   const cartTotal = cart.reduce((acc, c) => acc + c.price * c.quantity, 0);
   const reservationDeposit = guests * 100;
@@ -970,59 +806,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
               )}
 
               <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="block text-xs text-[#C9C1B1]">{t.notesLabel}</label>
-
-                  {activeTab === 'reservation' && (
-                    <button
-                      type="button"
-                      onClick={handleToggleVoiceRecording}
-                      disabled={isTranscribingVoice}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold border transition-colors cursor-pointer disabled:opacity-60 ${
-                        isRecordingVoice
-                          ? 'bg-red-950/80 border-red-400 text-red-200 animate-pulse'
-                          : 'bg-[#121212] hover:bg-[#1B1710] border-[#D4AF37]/50 hover:border-[#D4AF37] text-[#D4AF37]'
-                      }`}
-                    >
-                      {isTranscribingVoice ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                          <span>{t.voiceTranscribing}</span>
-                        </>
-                      ) : isRecordingVoice ? (
-                        <>
-                          <Square className="w-3 h-3 fill-current shrink-0" />
-                          <span>{t.voiceStopBtn}</span>
-                          <span dir="ltr" className="font-mono text-[11px]">
-                            {formatTimer(recordingSeconds)}
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <Mic className="w-3.5 h-3.5 shrink-0" />
-                          <span>{t.voiceNoteBtn}</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                {activeTab === 'reservation' && (
-                  <p className="text-[11px] text-[#9E9585]">{t.voiceHint}</p>
-                )}
-
-                {voiceError && (
-                  <p className="text-xs text-red-300 bg-red-950/40 border border-red-500/40 px-3 py-2">
-                    {voiceError}
-                  </p>
-                )}
-
-                {voiceAddedNotice && (
-                  <p className="text-xs text-[#10B981] font-semibold flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                    <span>{t.voiceAddedNotice}</span>
-                  </p>
-                )}
+                <label className="block text-xs text-[#C9C1B1]">{t.notesLabel}</label>
 
                 <textarea
                   rows={2}
@@ -1035,7 +819,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
 
               <button
                 type="submit"
-                disabled={(activeTab === 'order' && cart.length === 0) || isRecordingVoice || isTranscribingVoice}
+                disabled={activeTab === 'order' && cart.length === 0}
                 className="w-full py-4 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-40 text-[#121212] font-bold text-sm sm:text-base transition-colors cursor-pointer shadow-[0_0_25px_rgba(212,175,55,0.3)]"
               >
                 {activeTab === 'reservation' ? t.submitReserve : t.submitOrderNow}

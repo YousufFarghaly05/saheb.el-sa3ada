@@ -53,6 +53,14 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
           alt={lang === 'ar' ? branchConfig.nameAr : branchConfig.nameEn}
           decoding="async"
           referrerPolicy="no-referrer"
+          onError={(e) => {
+            const img = e.currentTarget;
+            if (!img.dataset.fallbackApplied) {
+              img.dataset.fallbackApplied = '1';
+              img.src =
+                'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=1400&q=80';
+            }
+          }}
           className="w-full h-full object-cover object-center scale-105 transition-all duration-700"
         />
         <div

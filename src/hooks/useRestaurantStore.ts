@@ -108,12 +108,26 @@ function normalizeBranchStore(
         /تنورة|شيشة|عود|مسرح|tanoura|shisha|oud/i.test(`${g.titleAr} ${g.titleEn || ''}`)
     );
 
+  const normalizedShows: ShowSchedule[] =
+    Array.isArray(parsed.shows) && parsed.shows.length && !hasLegacyPartyShows(parsed.shows)
+      ? parsed.shows.map((show, idx) => {
+          const url = show.imageUrl?.trim() || '';
+          const isValidExternal =
+            url.startsWith('https://') || url.startsWith('http://') || url.startsWith('data:image/');
+          if (isValidExternal) return show;
+          const matchingFallback =
+            fallback.shows.find((f) => f.id === show.id) ||
+            fallback.shows[idx % fallback.shows.length];
+          return {
+            ...show,
+            imageUrl: matchingFallback?.imageUrl,
+          };
+        })
+      : fallback.shows;
+
   return {
     menu: cleanedMenu.length && !hasUnmigratedJuiceImages ? cleanedMenu : fallback.menu,
-    shows:
-      Array.isArray(parsed.shows) && parsed.shows.length && !hasLegacyPartyShows(parsed.shows)
-        ? parsed.shows
-        : fallback.shows,
+    shows: normalizedShows,
     gallery:
       Array.isArray(parsed.gallery) && parsed.gallery.length && !hasLegacyGallery
         ? parsed.gallery
