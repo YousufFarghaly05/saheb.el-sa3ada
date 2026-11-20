@@ -2,7 +2,8 @@ node_modules/
 build/
 dist/
 dev-dist/
-data/!src/data/
+data/
+!src/data/
 coverage/
 .DS_Store
 *.log
