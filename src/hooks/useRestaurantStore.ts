@@ -288,7 +288,9 @@ export function useRestaurantStore() {
   useEffect(() => {
     let active = true;
     fetch('/api/store')
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) =>
+        res.ok && res.headers.get('content-type')?.includes('application/json') ? res.json() : null
+      )
       .then((serverPayload: Partial<DualBranchStoreState> | null) => {
         if (!active || !serverPayload) return;
 
@@ -337,7 +339,11 @@ export function useRestaurantStore() {
       if (Date.now() - lastLocalWriteRef.current < 3000) return;
 
       fetch('/api/store')
-        .then((res) => (res.ok ? res.json() : null))
+        .then((res) =>
+          res.ok && res.headers.get('content-type')?.includes('application/json')
+            ? res.json()
+            : null
+        )
         .then((serverPayload: Partial<DualBranchStoreState> | null) => {
           if (!active || !serverPayload) return;
           if (Date.now() - lastLocalWriteRef.current < 3000) return;

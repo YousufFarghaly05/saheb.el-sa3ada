@@ -188,6 +188,23 @@ function readStore() {
         if (isLegacyPartyShows(parsed[bKey]?.shows)) {
           parsed[bKey].shows = INITIAL_BRANCH_STORES[bKey].shows;
           dirty = true;
+        } else if (Array.isArray(parsed[bKey]?.shows)) {
+          const fallbackShows = INITIAL_BRANCH_STORES[bKey].shows;
+          parsed[bKey].shows = parsed[bKey].shows.map(
+            (show: { id?: string; imageUrl?: string }, idx: number) => {
+              const url = String(show?.imageUrl || '').trim();
+              const isValidExternal =
+                url.startsWith('https://') ||
+                url.startsWith('http://') ||
+                url.startsWith('data:image/');
+              if (isValidExternal) return show;
+              dirty = true;
+              const match =
+                fallbackShows.find((f) => f.id === show?.id) ||
+                fallbackShows[idx % fallbackShows.length];
+              return { ...show, imageUrl: match?.imageUrl };
+            }
+          );
         }
         if (!parsed[bKey].cmsSettings) {
           parsed[bKey].cmsSettings = INITIAL_BRANCH_STORES[bKey].cmsSettings;

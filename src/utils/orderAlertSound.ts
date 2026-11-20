@@ -25,9 +25,53 @@ export function unlockAudioContext(): void {
   }
 }
 
+function scheduleChime(ctx: AudioContext): void {
+  const now = ctx.currentTime + 0.01;
+  // Ascending major arpeggio bell chime (C5 -> E5 -> G5 -> C6)
+  const notes = [
+    { freq: 523.25, start: 0.0, duration: 0.28, gain: 0.22 },
+    { freq: 659.25, start: 0.12, duration: 0.3, gain: 0.22 },
+    { freq: 783.99, start: 0.24, duration: 0.34, gain: 0.24 },
+    { freq: 1046.5, start: 0.38, duration: 0.55, gain: 0.26 },
+  ];
+
+  const masterGain = ctx.createGain();
+  masterGain.gain.setValueAtTime(0.85, now);
+  masterGain.connect(ctx.destination);
+
+  notes.forEach(({ freq, start, duration, gain }) => {
+    const osc = ctx.createOscillator();
+    const harmonic = ctx.createOscillator();
+    const env = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, now + start);
+
+    harmonic.type = 'triangle';
+    harmonic.frequency.setValueAtTime(freq * 2, now + start);
+
+    const harmonicGain = ctx.createGain();
+    harmonicGain.gain.setValueAtTime(0.18, now + start);
+
+    env.gain.setValueAtTime(0.0001, now + start);
+    env.gain.linearRampToValueAtTime(gain, now + start + 0.015);
+    env.gain.exponentialRampToValueAtTime(0.0008, now + start + duration);
+
+    osc.connect(env);
+    harmonic.connect(harmonicGain);
+    harmonicGain.connect(env);
+    env.connect(masterGain);
+
+    osc.start(now + start);
+    harmonic.start(now + start);
+    osc.stop(now + start + duration + 0.03);
+    harmonic.stop(now + start + duration + 0.03);
+  });
+}
+
 /**
  * Plays a warm, crisp multi-tone hospitality chime using the Web Audio API.
- * Safe to invoke without external MP3 assets.
+ * Safe to invoke without external MP3 assets and resilient when AudioContext starts suspended.
  */
 export function playOrderNotificationChime(): boolean {
   try {
@@ -35,50 +79,13 @@ export function playOrderNotificationChime(): boolean {
     if (!ctx) return false;
 
     if (ctx.state === 'suspended') {
-      void ctx.resume();
+      ctx
+        .resume()
+        .then(() => scheduleChime(ctx))
+        .catch(() => {});
+    } else {
+      scheduleChime(ctx);
     }
-
-    const now = ctx.currentTime;
-    // Ascending major arpeggio bell chime (C5 -> E5 -> G5 -> C6)
-    const notes = [
-      { freq: 523.25, start: 0.0, duration: 0.28, gain: 0.22 },
-      { freq: 659.25, start: 0.12, duration: 0.3, gain: 0.22 },
-      { freq: 783.99, start: 0.24, duration: 0.34, gain: 0.24 },
-      { freq: 1046.5, start: 0.38, duration: 0.55, gain: 0.26 },
-    ];
-
-    const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.85, now);
-    masterGain.connect(ctx.destination);
-
-    notes.forEach(({ freq, start, duration, gain }) => {
-      const osc = ctx.createOscillator();
-      const harmonic = ctx.createOscillator();
-      const env = ctx.createGain();
-
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + start);
-
-      harmonic.type = 'triangle';
-      harmonic.frequency.setValueAtTime(freq * 2, now + start);
-
-      const harmonicGain = ctx.createGain();
-      harmonicGain.gain.setValueAtTime(0.18, now + start);
-
-      env.gain.setValueAtTime(0.0001, now + start);
-      env.gain.linearRampToValueAtTime(gain, now + start + 0.015);
-      env.gain.exponentialRampToValueAtTime(0.0008, now + start + duration);
-
-      osc.connect(env);
-      harmonic.connect(harmonicGain);
-      harmonicGain.connect(env);
-      env.connect(masterGain);
-
-      osc.start(now + start);
-      harmonic.start(now + start);
-      osc.stop(now + start + duration + 0.03);
-      harmonic.stop(now + start + duration + 0.03);
-    });
 
     return true;
   } catch {
