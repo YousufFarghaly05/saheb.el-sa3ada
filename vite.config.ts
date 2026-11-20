@@ -167,6 +167,7 @@ export default defineConfig(() => {
           enabled: true,
           type: 'module',
           navigateFallback: 'index.html',
+          resolveTempFolder: () => path.resolve(__dirname, 'node_modules/.vite-pwa'),
         },
       }),
     ],

@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
@@ -10,7 +11,7 @@ import { INITIAL_BRANCH_STORES } from './src/data/initialData';
 dotenv.config();
 
 const PORT = 3000;
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR || path.join(os.tmpdir(), 'saheb-elsaada-data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const STORE_FILE = path.join(DATA_DIR, 'store.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
