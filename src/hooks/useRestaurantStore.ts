@@ -1,4 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
 import type {
   BranchCmsSettings,
   BranchContactSettings,
@@ -14,6 +26,7 @@ import type {
   CustomerReview,
 } from '../types.ts';
 import { INITIAL_BRANCH_STORES } from '../data/initialData.ts';
+import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
 
 const BRANCH_STORAGE_KEYS: Record<BranchId, string> = {
   branch_tagamoa: 'branch_tagamoa',
@@ -21,10 +34,32 @@ const BRANCH_STORAGE_KEYS: Record<BranchId, string> = {
   branch_zayed: 'branch_zayed',
 };
 
+const VALID_BRANCH_IDS: BranchId[] = ['branch_tagamoa', 'branch_moez', 'branch_zayed'];
+
 const STORE_BROADCAST_CHANNEL = 'saheb_elsaada_store_sync_v1';
 export const ORDER_CANCEL_WINDOW_MS = 15 * 60 * 1000;
 
 export const LIVE_REVIEWS_STORAGE_KEY = 'saheb_elsaada_live_reviews_v1';
+
+function isBranchId(value: unknown): value is BranchId {
+  return value === 'branch_tagamoa' || value === 'branch_moez' || value === 'branch_zayed';
+}
+
+function stripUndefinedDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([k, v]) => {
+      if (v !== undefined) {
+        out[k] = stripUndefinedDeep(v);
+      }
+    });
+    return out as T;
+  }
+  return value;
+}
 
 function readLiveReviewsFromStorage(): CustomerReview[] {
   try {
@@ -34,7 +69,13 @@ function readLiveReviewsFromStorage(): CustomerReview[] {
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
       (r): r is CustomerReview =>
-        Boolean(r && typeof r === 'object' && typeof r.id === 'string' && typeof r.author === 'string' && typeof r.comment === 'string')
+        Boolean(
+          r &&
+            typeof r === 'object' &&
+            typeof r.id === 'string' &&
+            typeof r.author === 'string' &&
+            typeof r.comment === 'string'
+        )
     );
   } catch {
     return [];
@@ -53,11 +94,13 @@ const CATALOG_VERSION_KEY = 'saheb_elsaada_menu_catalog_v3';
 
 function hasLegacySampleMenu(menu: MenuItem[] | undefined): boolean {
   if (!Array.isArray(menu) || menu.length === 0) return true;
-  // Detect old pre-PDF 12-15 item sample menus or unmigrated juice sahlab images
   return (
     menu.some((m) => m.id === 'm-1' || m.id === 'moez-m-1') ||
     menu.some((m) => m.id.endsWith('-juc-1') && m.imageUrl === '/assets/aistudio/unnamed_062b5ea3.jpg') ||
-    (menu.length < 30 && !menu.some((m) => m.id.startsWith('tag-') || m.id.startsWith('moez-brk-') || m.id.startsWith('zayed-')))
+    (menu.length < 30 &&
+      !menu.some(
+        (m) => m.id.startsWith('tag-') || m.id.startsWith('moez-brk-') || m.id.startsWith('zayed-')
+      ))
   );
 }
 
@@ -65,15 +108,17 @@ const CMS_MIGRATION_KEY = 'saheb_elsaada_cms_neutral_v3';
 
 function hasLegacyPartyShows(shows: ShowSchedule[] | undefined): boolean {
   if (!Array.isArray(shows) || shows.length === 0) return false;
-  return shows.some((s) =>
-    ['s-sat', 'moez-s-sat', 'zayed-s-sat'].includes(s.id)
-  );
+  return shows.some((s) => ['s-sat', 'moez-s-sat', 'zayed-s-sat'].includes(s.id));
 }
 
 function hasLegacyShishaOrGallery(parsed: Partial<StoreState>): boolean {
   const hasLegacyShisha =
     Array.isArray(parsed.menu) &&
-    parsed.menu.some((m) => m.category === 'shisha' || ['tag-shs-1', 'tag-shs-2', 'moez-shs-1', 'moez-shs-2'].includes(m.id));
+    parsed.menu.some(
+      (m) =>
+        m.category === 'shisha' ||
+        ['tag-shs-1', 'tag-shs-2', 'moez-shs-1', 'moez-shs-2'].includes(m.id)
+    );
   const hasLegacyGallery =
     Array.isArray(parsed.gallery) &&
     parsed.gallery.some(
@@ -82,6 +127,27 @@ function hasLegacyShishaOrGallery(parsed: Partial<StoreState>): boolean {
         /تنورة|شيشة|عود|مسرح|tanoura|shisha|oud/i.test(`${g.titleAr} ${g.titleEn || ''}`)
     );
   return hasLegacyShisha || hasLegacyGallery;
+}
+
+function normalizeShowsWithFallback(
+  shows: ShowSchedule[] | undefined,
+  fallbackShows: ShowSchedule[]
+): ShowSchedule[] {
+  if (!Array.isArray(shows) || !shows.length || hasLegacyPartyShows(shows)) {
+    return fallbackShows;
+  }
+  return shows.map((show, idx) => {
+    const url = show.imageUrl?.trim() || '';
+    const isValidExternal =
+      url.startsWith('https://') || url.startsWith('http://') || url.startsWith('data:image/');
+    if (isValidExternal) return show;
+    const matchingFallback =
+      fallbackShows.find((f) => f.id === show.id) || fallbackShows[idx % fallbackShows.length];
+    return {
+      ...show,
+      imageUrl: matchingFallback?.imageUrl,
+    };
+  });
 }
 
 function normalizeBranchStore(
@@ -108,26 +174,9 @@ function normalizeBranchStore(
         /تنورة|شيشة|عود|مسرح|tanoura|shisha|oud/i.test(`${g.titleAr} ${g.titleEn || ''}`)
     );
 
-  const normalizedShows: ShowSchedule[] =
-    Array.isArray(parsed.shows) && parsed.shows.length && !hasLegacyPartyShows(parsed.shows)
-      ? parsed.shows.map((show, idx) => {
-          const url = show.imageUrl?.trim() || '';
-          const isValidExternal =
-            url.startsWith('https://') || url.startsWith('http://') || url.startsWith('data:image/');
-          if (isValidExternal) return show;
-          const matchingFallback =
-            fallback.shows.find((f) => f.id === show.id) ||
-            fallback.shows[idx % fallback.shows.length];
-          return {
-            ...show,
-            imageUrl: matchingFallback?.imageUrl,
-          };
-        })
-      : fallback.shows;
-
   return {
     menu: cleanedMenu.length && !hasUnmigratedJuiceImages ? cleanedMenu : fallback.menu,
-    shows: normalizedShows,
+    shows: normalizeShowsWithFallback(parsed.shows, fallback.shows),
     gallery:
       Array.isArray(parsed.gallery) && parsed.gallery.length && !hasLegacyGallery
         ? parsed.gallery
@@ -188,7 +237,9 @@ function readBranchFromLocalStorage(branchId: BranchId): StoreState | null {
       return {
         ...normalized,
         menu: normalized.menu,
-        shows: hasLegacyPartyShows(parsed.shows) ? INITIAL_BRANCH_STORES[branchId].shows : normalized.shows,
+        shows: hasLegacyPartyShows(parsed.shows)
+          ? INITIAL_BRANCH_STORES[branchId].shows
+          : normalized.shows,
         gallery: INITIAL_BRANCH_STORES[branchId].gallery,
       };
     }
@@ -206,10 +257,93 @@ function writeBranchToLocalStorage(branchId: BranchId, data: StoreState) {
   }
 }
 
-export function useRestaurantStore() {
+function parseFirestoreOrder(docId: string, raw: Record<string, unknown>): OnlineOrder | null {
+  const branchId: BranchId = isBranchId(raw.branchId) ? raw.branchId : 'branch_tagamoa';
+  const customerName = typeof raw.customerName === 'string' ? raw.customerName : '';
+  const phone = typeof raw.phone === 'string' ? raw.phone : '';
+  if (!customerName && !phone) return null;
+
+  let createdAtStr = new Date().toISOString();
+  if (typeof raw.createdAt === 'string' && raw.createdAt.trim()) {
+    createdAtStr = raw.createdAt;
+  } else if (
+    raw.createdAtServer &&
+    typeof raw.createdAtServer === 'object' &&
+    'toDate' in raw.createdAtServer &&
+    typeof (raw.createdAtServer as { toDate?: () => Date }).toDate === 'function'
+  ) {
+    createdAtStr = (raw.createdAtServer as { toDate: () => Date }).toDate().toISOString();
+  }
+
+  const rawItems = Array.isArray(raw.items) ? raw.items : [];
+  const items = rawItems
+    .filter((it): it is Record<string, unknown> => Boolean(it && typeof it === 'object'))
+    .map((it) => ({
+      menuItemId: String(it.menuItemId || ''),
+      titleAr: String(it.titleAr || ''),
+      titleEn: String(it.titleEn || it.titleAr || ''),
+      price: Number(it.price) || 0,
+      quantity: Math.max(1, Number(it.quantity) || 1),
+    }));
+
+  const statusVal = String(raw.status || 'pending');
+  const status: BookingStatus =
+    statusVal === 'pending' ||
+    statusVal === 'preparing' ||
+    statusVal === 'confirmed' ||
+    statusVal === 'completed' ||
+    statusVal === 'cancelled'
+      ? statusVal
+      : 'pending';
+
+  return {
+    id: typeof raw.orderCode === 'string' && raw.orderCode.trim() ? raw.orderCode : docId,
+    firestoreDocId: docId,
+    branchId,
+    customerId: typeof raw.customerId === 'string' ? raw.customerId : undefined,
+    customerName,
+    phone,
+    serviceType: raw.serviceType === 'takeaway' ? 'takeaway' : 'delivery',
+    address: typeof raw.address === 'string' ? raw.address : '',
+    requestedTime: typeof raw.requestedTime === 'string' ? raw.requestedTime : '',
+    items,
+    totalAmount: Number(raw.totalAmount) || 0,
+    paymentMethod:
+      raw.paymentMethod === 'instapay_vodafone' ? 'instapay_vodafone' : 'cash_on_delivery',
+    paymentStatus:
+      raw.paymentStatus === 'paid' || raw.paymentStatus === 'transfer_submitted'
+        ? raw.paymentStatus
+        : 'pending_cod',
+    transferSender: typeof raw.transferSender === 'string' ? raw.transferSender : undefined,
+    notes: typeof raw.notes === 'string' ? raw.notes : '',
+    status,
+    rating: typeof raw.rating === 'number' ? raw.rating : undefined,
+    ratingComment: typeof raw.ratingComment === 'string' ? raw.ratingComment : undefined,
+    ratedAt: typeof raw.ratedAt === 'string' ? raw.ratedAt : undefined,
+    cancelledBy:
+      raw.cancelledBy === 'customer' || raw.cancelledBy === 'admin' ? raw.cancelledBy : undefined,
+    cancelledAt: typeof raw.cancelledAt === 'string' ? raw.cancelledAt : undefined,
+    cancellationReason:
+      typeof raw.cancellationReason === 'string' ? raw.cancellationReason : undefined,
+    adminCancelAcknowledged:
+      typeof raw.adminCancelAcknowledged === 'boolean' ? raw.adminCancelAcknowledged : undefined,
+    createdAt: createdAtStr,
+  };
+}
+
+// Keep Firestore branch documents safely below the 1MB limit when syncing inline media
+function sanitizeGalleryForFirestore(items: GalleryPhoto[]): GalleryPhoto[] {
+  return items.filter((item) => {
+    const approxBytes = (item.imageUrl?.length || 0) + (item.videoUrl?.length || 0);
+    return approxBytes < 450_000;
+  });
+}
+
+export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean }) {
+  const isAdminAuthenticated = Boolean(options?.isAdminAuthenticated);
+
   const [stores, setStores] = useState<DualBranchStoreState>(() => {
     try {
-      // Remove legacy single-branch storage keys
       localStorage.removeItem('saheb_elsaada_newcairo_v1');
       localStorage.removeItem('saheb_elsaada_newcairo_v2');
       localStorage.removeItem('saheb_elsaada_newcairo_v3');
@@ -243,9 +377,10 @@ export function useRestaurantStore() {
     return initial;
   });
 
-  const lastLocalWriteRef = useRef<number>(0);
+  const [firestoreOrdersReady, setFirestoreOrdersReady] = useState(false);
   const channelRef = useRef<BroadcastChannel | null>(null);
 
+  // Sync across tabs in the same browser
   useEffect(() => {
     if (typeof BroadcastChannel !== 'undefined') {
       const ch = new BroadcastChannel(STORE_BROADCAST_CHANNEL);
@@ -262,11 +397,7 @@ export function useRestaurantStore() {
     }
 
     const handleBranchStorageSync = (e: StorageEvent) => {
-      if (
-        e.key === 'branch_tagamoa' ||
-        e.key === 'branch_moez' ||
-        e.key === 'branch_zayed'
-      ) {
+      if (isBranchId(e.key)) {
         const synced = readBranchFromLocalStorage(e.key);
         if (synced) {
           setStores((prev) => ({
@@ -285,122 +416,223 @@ export function useRestaurantStore() {
     };
   }, []);
 
+  // --- Cloud Firestore Real-Time Sync: Menus, Offers/Announcements, and Gallery (All Users) ---
   useEffect(() => {
-    let active = true;
-    fetch('/api/store')
-      .then((res) =>
-        res.ok && res.headers.get('content-type')?.includes('application/json') ? res.json() : null
-      )
-      .then((serverPayload: Partial<DualBranchStoreState> | null) => {
-        if (!active || !serverPayload) return;
-
-        const hasLocalTagamoa = Boolean(localStorage.getItem(BRANCH_STORAGE_KEYS.branch_tagamoa));
-        const hasLocalMoez = Boolean(localStorage.getItem(BRANCH_STORAGE_KEYS.branch_moez));
-        const hasLocalZayed = Boolean(localStorage.getItem(BRANCH_STORAGE_KEYS.branch_zayed));
-
+    const unsubMenus = onSnapshot(
+      collection(db, 'branch_menus'),
+      (snapshot) => {
+        if (snapshot.empty) return;
         setStores((prev) => {
-          const nextTagamoa =
-            !hasLocalTagamoa && serverPayload.branch_tagamoa
-              ? normalizeBranchStore(
-                  serverPayload.branch_tagamoa,
-                  INITIAL_BRANCH_STORES.branch_tagamoa
-                )
-              : prev.branch_tagamoa;
-
-          const nextMoez =
-            !hasLocalMoez && serverPayload.branch_moez
-              ? normalizeBranchStore(serverPayload.branch_moez, INITIAL_BRANCH_STORES.branch_moez)
-              : prev.branch_moez;
-
-          const nextZayed =
-            !hasLocalZayed && serverPayload.branch_zayed
-              ? normalizeBranchStore(
-                  serverPayload.branch_zayed,
-                  INITIAL_BRANCH_STORES.branch_zayed
-                )
-              : prev.branch_zayed;
-
-          if (!hasLocalTagamoa) writeBranchToLocalStorage('branch_tagamoa', nextTagamoa);
-          if (!hasLocalMoez) writeBranchToLocalStorage('branch_moez', nextMoez);
-          if (!hasLocalZayed) writeBranchToLocalStorage('branch_zayed', nextZayed);
-
-          return {
-            branch_tagamoa: nextTagamoa,
-            branch_moez: nextMoez,
-            branch_zayed: nextZayed,
-          };
-        });
-      })
-      .catch(() => {});
-
-    // Periodic lightweight sync for orders & reservations across sessions
-    const pollInterval = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') return;
-      if (Date.now() - lastLocalWriteRef.current < 3000) return;
-
-      fetch('/api/store')
-        .then((res) =>
-          res.ok && res.headers.get('content-type')?.includes('application/json')
-            ? res.json()
-            : null
-        )
-        .then((serverPayload: Partial<DualBranchStoreState> | null) => {
-          if (!active || !serverPayload) return;
-          if (Date.now() - lastLocalWriteRef.current < 3000) return;
-
-          setStores((prev) => {
-            let changed = false;
-            const next: DualBranchStoreState = { ...prev };
-
-            (['branch_tagamoa', 'branch_moez', 'branch_zayed'] as BranchId[]).forEach((bId) => {
-              const serverOrders = serverPayload[bId]?.orders;
-              if (!Array.isArray(serverOrders)) return;
-              const prevOrders = prev[bId].orders;
-              const prevOrderMap = new Map(prevOrders.map((o) => [o.id, o]));
-              let branchOrdersChanged = false;
-              const mergedOrders = [...prevOrders];
-
-              serverOrders.forEach((srvOrder) => {
-                const localOrder = prevOrderMap.get(srvOrder.id);
-                if (!localOrder) {
-                  mergedOrders.unshift(srvOrder);
-                  branchOrdersChanged = true;
-                } else if (
-                  localOrder.status !== srvOrder.status ||
-                  localOrder.adminCancelAcknowledged !== srvOrder.adminCancelAcknowledged ||
-                  localOrder.cancelledBy !== srvOrder.cancelledBy
-                ) {
-                  const idx = mergedOrders.findIndex((o) => o.id === srvOrder.id);
-                  if (idx >= 0) {
-                    mergedOrders[idx] = { ...localOrder, ...srvOrder };
-                    branchOrdersChanged = true;
-                  }
-                }
-              });
-
-              if (branchOrdersChanged) {
-                changed = true;
-                const updatedBranch = { ...prev[bId], orders: mergedOrders };
-                next[bId] = updatedBranch;
-                writeBranchToLocalStorage(bId, updatedBranch);
-              }
-            });
-
-            return changed ? next : prev;
+          let changed = false;
+          const next = { ...prev };
+          snapshot.forEach((docSnap) => {
+            if (!isBranchId(docSnap.id)) return;
+            const data = docSnap.data();
+            if (Array.isArray(data.items) && data.items.length > 0) {
+              const updatedBranch: StoreState = {
+                ...prev[docSnap.id],
+                menu: data.items as MenuItem[],
+              };
+              next[docSnap.id] = updatedBranch;
+              writeBranchToLocalStorage(docSnap.id, updatedBranch);
+              changed = true;
+            }
           });
-        })
-        .catch(() => {});
-    }, 4500);
+          return changed ? next : prev;
+        });
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'branch_menus');
+      }
+    );
+
+    const unsubOffers = onSnapshot(
+      collection(db, 'branch_offers'),
+      (snapshot) => {
+        if (snapshot.empty) return;
+        setStores((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          snapshot.forEach((docSnap) => {
+            if (!isBranchId(docSnap.id)) return;
+            const data = docSnap.data();
+            const updatedBranch: StoreState = {
+              ...prev[docSnap.id],
+              shows: Array.isArray(data.shows)
+                ? normalizeShowsWithFallback(
+                    data.shows as ShowSchedule[],
+                    INITIAL_BRANCH_STORES[docSnap.id].shows
+                  )
+                : prev[docSnap.id].shows,
+              cmsSettings:
+                data.cmsSettings && typeof data.cmsSettings === 'object'
+                  ? (data.cmsSettings as BranchCmsSettings)
+                  : prev[docSnap.id].cmsSettings,
+              branchSettings:
+                data.branchSettings && typeof data.branchSettings === 'object'
+                  ? (data.branchSettings as BranchContactSettings)
+                  : prev[docSnap.id].branchSettings,
+            };
+            next[docSnap.id] = updatedBranch;
+            writeBranchToLocalStorage(docSnap.id, updatedBranch);
+            changed = true;
+          });
+          return changed ? next : prev;
+        });
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'branch_offers');
+      }
+    );
+
+    const unsubGallery = onSnapshot(
+      collection(db, 'branch_gallery'),
+      (snapshot) => {
+        if (snapshot.empty) return;
+        setStores((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          snapshot.forEach((docSnap) => {
+            if (!isBranchId(docSnap.id)) return;
+            const data = docSnap.data();
+            if (Array.isArray(data.items)) {
+              const updatedBranch: StoreState = {
+                ...prev[docSnap.id],
+                gallery: data.items as GalleryPhoto[],
+              };
+              next[docSnap.id] = updatedBranch;
+              writeBranchToLocalStorage(docSnap.id, updatedBranch);
+              changed = true;
+            }
+          });
+          return changed ? next : prev;
+        });
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'branch_gallery');
+      }
+    );
 
     return () => {
-      active = false;
-      window.clearInterval(pollInterval);
+      unsubMenus();
+      unsubOffers();
+      unsubGallery();
     };
   }, []);
 
+  // --- Cloud Firestore Real-Time Orders Listener (STRICTLY Admin Authenticated Only) ---
+  useEffect(() => {
+    if (!isAdminAuthenticated || !isAdminEmail(auth.currentUser?.email)) {
+      setFirestoreOrdersReady(false);
+      return;
+    }
+
+    const ordersQuery = query(collection(db, 'orders'), orderBy('createdAt', 'desc'));
+    const unsubOrders = onSnapshot(
+      ordersQuery,
+      (snapshot) => {
+        const grouped: Record<BranchId, OnlineOrder[]> = {
+          branch_tagamoa: [],
+          branch_moez: [],
+          branch_zayed: [],
+        };
+
+        snapshot.forEach((docSnap) => {
+          const parsed = parseFirestoreOrder(docSnap.id, docSnap.data() as Record<string, unknown>);
+          if (parsed && parsed.branchId && isBranchId(parsed.branchId)) {
+            grouped[parsed.branchId].push(parsed);
+          }
+        });
+
+        // Guarantee strict newest-first sorting per branch
+        VALID_BRANCH_IDS.forEach((bId) => {
+          grouped[bId].sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+        });
+
+        setStores((prev) => {
+          const next: DualBranchStoreState = { ...prev };
+          VALID_BRANCH_IDS.forEach((bId) => {
+            const updatedBranch: StoreState = {
+              ...prev[bId],
+              orders: grouped[bId],
+            };
+            next[bId] = updatedBranch;
+            writeBranchToLocalStorage(bId, updatedBranch);
+          });
+          return next;
+        });
+        setFirestoreOrdersReady(true);
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'orders');
+        setFirestoreOrdersReady(true);
+      }
+    );
+
+    return () => unsubOrders();
+  }, [isAdminAuthenticated]);
+
+  // Firestore write helpers (strictly admin-guarded)
+  const syncMenuToFirestore = useCallback((branchId: BranchId, items: MenuItem[]) => {
+    if (!isAdminEmail(auth.currentUser?.email)) return;
+    void setDoc(
+      doc(db, 'branch_menus', branchId),
+      stripUndefinedDeep({
+        items,
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    ).catch((error) => {
+      logFirestoreError(error, OperationType.WRITE, `branch_menus/${branchId}`);
+    });
+  }, []);
+
+  const syncOffersToFirestore = useCallback(
+    (
+      branchId: BranchId,
+      payload: {
+        shows?: ShowSchedule[];
+        cmsSettings?: BranchCmsSettings;
+        branchSettings?: BranchContactSettings;
+      }
+    ) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      void setDoc(
+        doc(db, 'branch_offers', branchId),
+        stripUndefinedDeep({
+          ...payload,
+          updatedAt: serverTimestamp(),
+        }),
+        { merge: true }
+      ).catch((error) => {
+        logFirestoreError(error, OperationType.WRITE, `branch_offers/${branchId}`);
+      });
+    },
+    []
+  );
+
+  const syncGalleryToFirestore = useCallback((branchId: BranchId, items: GalleryPhoto[]) => {
+    if (!isAdminEmail(auth.currentUser?.email)) return;
+    void setDoc(
+      doc(db, 'branch_gallery', branchId),
+      stripUndefinedDeep({
+        items: sanitizeGalleryForFirestore(items),
+        updatedAt: serverTimestamp(),
+      }),
+      { merge: true }
+    ).catch((error) => {
+      logFirestoreError(error, OperationType.WRITE, `branch_gallery/${branchId}`);
+    });
+  }, []);
+
   const persistBranch = useCallback(
-    (branchId: BranchId, updater: (prevBranch: StoreState) => StoreState) => {
-      lastLocalWriteRef.current = Date.now();
+    (
+      branchId: BranchId,
+      updater: (prevBranch: StoreState) => StoreState,
+      onNextBranch?: (nextBranch: StoreState) => void
+    ) => {
       setStores((prev) => {
         const nextBranch = updater(prev[branchId]);
         const nextStores: DualBranchStoreState = {
@@ -409,154 +641,215 @@ export function useRestaurantStore() {
         };
         writeBranchToLocalStorage(branchId, nextBranch);
         channelRef.current?.postMessage({ branchId, data: nextBranch });
-        fetch('/api/store', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(nextStores),
-        }).catch(() => {});
+        if (onNextBranch) {
+          onNextBranch(nextBranch);
+        }
         return nextStores;
       });
     },
     []
   );
 
-  // Branch Contact / WhatsApp / Payment Settings (Scoped strictly to branchId)
+  // Branch Contact / WhatsApp / Payment Settings (Admin Only -> Synced to Firestore)
   const updateBranchSettings = useCallback(
     (branchId: BranchId, settings: Partial<BranchContactSettings>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        branchSettings: {
-          ...(prev.branchSettings || {}),
-          ...settings,
-        },
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          branchSettings: {
+            ...(prev.branchSettings || {}),
+            ...settings,
+          },
+        }),
+        (next) => {
+          syncOffersToFirestore(branchId, {
+            branchSettings: next.branchSettings as BranchContactSettings | undefined,
+          });
+        }
+      );
     },
-    [persistBranch]
+    [persistBranch, syncOffersToFirestore]
   );
 
-  // Branch CMS Announcements & Reservation Notes (Scoped strictly to branchId)
+  // Branch CMS Announcements & Reservation Notes (Admin Only -> Synced to Firestore)
   const updateCmsSettings = useCallback(
     (branchId: BranchId, settings: Partial<BranchCmsSettings>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        cmsSettings: {
-          ...(prev.cmsSettings || {}),
-          ...settings,
-        },
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          cmsSettings: {
+            ...(prev.cmsSettings || {}),
+            ...settings,
+          },
+        }),
+        (next) => {
+          syncOffersToFirestore(branchId, {
+            cmsSettings: next.cmsSettings as BranchCmsSettings | undefined,
+          });
+        }
+      );
     },
-    [persistBranch]
+    [persistBranch, syncOffersToFirestore]
   );
 
-  // Menu CRUD (Scoped strictly to branchId)
+  // Menu CRUD (Admin Only -> Synced to Firestore branch_menus)
   const addMenuItem = useCallback(
     (branchId: BranchId, item: Omit<MenuItem, 'id'>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        menu: [{ ...item, id: `${branchId}-m-${Date.now()}` }, ...prev.menu],
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          menu: [{ ...item, id: `${branchId}-m-${Date.now()}` }, ...prev.menu],
+        }),
+        (next) => syncMenuToFirestore(branchId, next.menu)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncMenuToFirestore]
   );
 
   const updateMenuItem = useCallback(
     (branchId: BranchId, id: string, item: Partial<MenuItem>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        menu: prev.menu.map((m) => (m.id === id ? { ...m, ...item } : m)),
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          menu: prev.menu.map((m) => (m.id === id ? { ...m, ...item } : m)),
+        }),
+        (next) => syncMenuToFirestore(branchId, next.menu)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncMenuToFirestore]
   );
 
   const deleteMenuItem = useCallback(
     (branchId: BranchId, id: string) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        menu: prev.menu.filter((m) => m.id !== id),
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          menu: prev.menu.filter((m) => m.id !== id),
+        }),
+        (next) => syncMenuToFirestore(branchId, next.menu)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncMenuToFirestore]
   );
 
-  // Live Shows CRUD (Scoped strictly to branchId)
+  // Announcements / Offers CRUD (Admin Only -> Synced to Firestore branch_offers)
   const addShow = useCallback(
     (branchId: BranchId, show: Omit<ShowSchedule, 'id'>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        shows: [...prev.shows, { ...show, id: `${branchId}-s-${Date.now()}` }],
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          shows: [...prev.shows, { ...show, id: `${branchId}-s-${Date.now()}` }],
+        }),
+        (next) => syncOffersToFirestore(branchId, { shows: next.shows })
+      );
     },
-    [persistBranch]
+    [persistBranch, syncOffersToFirestore]
   );
 
   const updateShow = useCallback(
     (branchId: BranchId, id: string, show: Partial<ShowSchedule>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        shows: prev.shows.map((s) => (s.id === id ? { ...s, ...show } : s)),
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          shows: prev.shows.map((s) => (s.id === id ? { ...s, ...show } : s)),
+        }),
+        (next) => syncOffersToFirestore(branchId, { shows: next.shows })
+      );
     },
-    [persistBranch]
+    [persistBranch, syncOffersToFirestore]
   );
 
   const deleteShow = useCallback(
     (branchId: BranchId, id: string) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        shows: prev.shows.filter((s) => s.id !== id),
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          shows: prev.shows.filter((s) => s.id !== id),
+        }),
+        (next) => syncOffersToFirestore(branchId, { shows: next.shows })
+      );
     },
-    [persistBranch]
+    [persistBranch, syncOffersToFirestore]
   );
 
-  // Gallery CRUD (Scoped strictly to branchId)
+  // Gallery CRUD (Admin Only -> Synced to Firestore branch_gallery)
   const addGalleryPhoto = useCallback(
     (branchId: BranchId, photo: Omit<GalleryPhoto, 'id'>) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        gallery: [
-          {
-            ...photo,
-            id: `${branchId}-g-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          },
-          ...prev.gallery,
-        ],
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          gallery: [
+            {
+              ...photo,
+              id: `${branchId}-g-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            },
+            ...prev.gallery,
+          ],
+        }),
+        (next) => syncGalleryToFirestore(branchId, next.gallery)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncGalleryToFirestore]
   );
 
   const addGalleryPhotosBulk = useCallback(
     (branchId: BranchId, photos: Omit<GalleryPhoto, 'id'>[]) => {
-      persistBranch(branchId, (prev) => {
-        const existingKeys = new Set(prev.gallery.map((g) => g.videoUrl || g.imageUrl));
-        const uniqueNew = photos
-          .filter((p) => !existingKeys.has(p.videoUrl || p.imageUrl))
-          .map((p, idx) => ({
-            ...p,
-            id: `${branchId}-g-${Date.now()}-${idx}`,
-          }));
-        return {
-          ...prev,
-          gallery: [...uniqueNew, ...prev.gallery],
-        };
-      });
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => {
+          const existingKeys = new Set(prev.gallery.map((g) => g.videoUrl || g.imageUrl));
+          const uniqueNew = photos
+            .filter((p) => !existingKeys.has(p.videoUrl || p.imageUrl))
+            .map((p, idx) => ({
+              ...p,
+              id: `${branchId}-g-${Date.now()}-${idx}`,
+            }));
+          return {
+            ...prev,
+            gallery: [...uniqueNew, ...prev.gallery],
+          };
+        },
+        (next) => syncGalleryToFirestore(branchId, next.gallery)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncGalleryToFirestore]
   );
 
   const deleteGalleryPhoto = useCallback(
     (branchId: BranchId, id: string) => {
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        gallery: prev.gallery.filter((g) => g.id !== id),
-      }));
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...prev,
+          gallery: prev.gallery.filter((g) => g.id !== id),
+        }),
+        (next) => syncGalleryToFirestore(branchId, next.gallery)
+      );
     },
-    [persistBranch]
+    [persistBranch, syncGalleryToFirestore]
   );
 
-  // Reservations & Orders CRUD (Scoped strictly to branchId)
+  // Reservations CRUD
   const addReservation = useCallback(
     (
       branchId: BranchId,
@@ -586,6 +879,7 @@ export function useRestaurantStore() {
 
   const updateReservationStatus = useCallback(
     (branchId: BranchId, id: string, status: BookingStatus) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
       persistBranch(branchId, (prev) => ({
         ...prev,
         reservations: prev.reservations.map((r) => (r.id === id ? { ...r, status } : r)),
@@ -596,6 +890,7 @@ export function useRestaurantStore() {
 
   const deleteReservation = useCallback(
     (branchId: BranchId, id: string) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
       persistBranch(branchId, (prev) => ({
         ...prev,
         reservations: prev.reservations.filter((r) => r.id !== id),
@@ -604,6 +899,7 @@ export function useRestaurantStore() {
     [persistBranch]
   );
 
+  // Online Orders -> Saved directly to Cloud Firestore `orders` collection via addDoc
   const addOrder = useCallback(
     (
       branchId: BranchId,
@@ -615,28 +911,76 @@ export function useRestaurantStore() {
           : branchId === 'branch_zayed'
           ? 'ZAYED-ORD'
           : 'MOEZ-ORD';
+      const orderCode = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const createdAt = new Date().toISOString();
+
       const created: OnlineOrder = {
         ...entry,
         branchId,
-        id: `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: orderCode,
         status: 'pending',
-        createdAt: new Date().toISOString(),
+        createdAt,
       };
+
+      // Optimistic local state update so customer gets immediate confirmation & WhatsApp summary
       persistBranch(branchId, (prev) => ({
         ...prev,
         orders: [created, ...prev.orders],
       }));
+
+      // Save order to Cloud Firestore `orders` collection via addDoc
+      const firestorePayload = stripUndefinedDeep({
+        orderCode,
+        branchId,
+        customerId: entry.customerId || null,
+        customerName: entry.customerName,
+        phone: entry.phone,
+        serviceType: entry.serviceType,
+        address: entry.address,
+        requestedTime: entry.requestedTime,
+        items: entry.items,
+        totalAmount: entry.totalAmount,
+        paymentMethod: entry.paymentMethod,
+        paymentStatus: entry.paymentStatus,
+        transferSender: entry.transferSender || null,
+        notes: entry.notes || '',
+        status: 'pending',
+        createdAt,
+        createdAtServer: serverTimestamp(),
+      });
+
+      void addDoc(collection(db, 'orders'), firestorePayload)
+        .then((docRef) => {
+          persistBranch(branchId, (prev) => ({
+            ...prev,
+            orders: prev.orders.map((o) =>
+              o.id === orderCode ? { ...o, firestoreDocId: docRef.id } : o
+            ),
+          }));
+        })
+        .catch((error) => {
+          logFirestoreError(error, OperationType.CREATE, 'orders');
+        });
+
       return created;
     },
     [persistBranch]
   );
 
+  // Admin-Only Order Status Update via Firestore updateDoc
   const updateOrderStatus = useCallback(
     (branchId: BranchId, id: string, status: BookingStatus) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+
+      const existing = stores[branchId].orders.find(
+        (o) => o.id === id || o.firestoreDocId === id
+      );
+      const targetDocId = existing?.firestoreDocId;
+
       persistBranch(branchId, (prev) => ({
         ...prev,
         orders: prev.orders.map((o) => {
-          if (o.id !== id) return o;
+          if (o.id !== id && o.firestoreDocId !== id) return o;
           if (status === 'cancelled') {
             return {
               ...o,
@@ -649,8 +993,24 @@ export function useRestaurantStore() {
           return { ...o, status };
         }),
       }));
+
+      if (targetDocId) {
+        const updatePayload: Record<string, unknown> =
+          status === 'cancelled'
+            ? {
+                status,
+                cancelledBy: existing?.cancelledBy || 'admin',
+                cancelledAt: existing?.cancelledAt || new Date().toISOString(),
+                adminCancelAcknowledged: true,
+              }
+            : { status };
+
+        void updateDoc(doc(db, 'orders', targetDocId), updatePayload).catch((error) => {
+          logFirestoreError(error, OperationType.UPDATE, `orders/${targetDocId}`);
+        });
+      }
     },
-    [persistBranch]
+    [persistBranch, stores]
   );
 
   const cancelOrderByCustomer = useCallback(
@@ -695,14 +1055,29 @@ export function useRestaurantStore() {
 
   const acknowledgeOrderCancellation = useCallback(
     (branchId: BranchId, id: string) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+
+      const existing = stores[branchId].orders.find(
+        (o) => o.id === id || o.firestoreDocId === id
+      );
+      const targetDocId = existing?.firestoreDocId;
+
       persistBranch(branchId, (prev) => ({
         ...prev,
         orders: prev.orders.map((o) =>
-          o.id === id ? { ...o, adminCancelAcknowledged: true } : o
+          o.id === id || o.firestoreDocId === id ? { ...o, adminCancelAcknowledged: true } : o
         ),
       }));
+
+      if (targetDocId) {
+        void updateDoc(doc(db, 'orders', targetDocId), {
+          adminCancelAcknowledged: true,
+        }).catch((error) => {
+          logFirestoreError(error, OperationType.UPDATE, `orders/${targetDocId}`);
+        });
+      }
     },
-    [persistBranch]
+    [persistBranch, stores]
   );
 
   const rateOrder = useCallback(
@@ -727,14 +1102,28 @@ export function useRestaurantStore() {
     [persistBranch]
   );
 
+  // Admin-Only Permanent Order Deletion via Firestore deleteDoc
   const deleteOrder = useCallback(
     (branchId: BranchId, id: string) => {
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+
+      const existing = stores[branchId].orders.find(
+        (o) => o.id === id || o.firestoreDocId === id
+      );
+      const targetDocId = existing?.firestoreDocId;
+
       persistBranch(branchId, (prev) => ({
         ...prev,
-        orders: prev.orders.filter((o) => o.id !== id),
+        orders: prev.orders.filter((o) => o.id !== id && o.firestoreDocId !== id),
       }));
+
+      if (targetDocId) {
+        void deleteDoc(doc(db, 'orders', targetDocId)).catch((error) => {
+          logFirestoreError(error, OperationType.DELETE, `orders/${targetDocId}`);
+        });
+      }
     },
-    [persistBranch]
+    [persistBranch, stores]
   );
 
   const [reviews, setReviews] = useState<CustomerReview[]>(() => readLiveReviewsFromStorage());
@@ -767,6 +1156,7 @@ export function useRestaurantStore() {
   );
 
   const deleteReview = useCallback((id: string) => {
+    if (!isAdminEmail(auth.currentUser?.email)) return;
     setReviews((prev) => {
       const next = prev.filter((r) => r.id !== id);
       writeLiveReviewsToStorage(next);
@@ -776,14 +1166,32 @@ export function useRestaurantStore() {
 
   const resetBranchDefaults = useCallback(
     (branchId: BranchId) => {
-      persistBranch(branchId, () => INITIAL_BRANCH_STORES[branchId]);
+      if (!isAdminEmail(auth.currentUser?.email)) return;
+      const defaults = INITIAL_BRANCH_STORES[branchId];
+      persistBranch(
+        branchId,
+        (prev) => ({
+          ...defaults,
+          // Keep live Firestore orders intact on menu/offers reset
+          orders: prev.orders,
+        }),
+        (next) => {
+          syncMenuToFirestore(branchId, next.menu);
+          syncOffersToFirestore(branchId, {
+            shows: next.shows,
+            cmsSettings: next.cmsSettings as BranchCmsSettings | undefined,
+          });
+          syncGalleryToFirestore(branchId, next.gallery);
+        }
+      );
     },
-    [persistBranch]
+    [persistBranch, syncGalleryToFirestore, syncMenuToFirestore, syncOffersToFirestore]
   );
 
   return {
     stores,
     reviews,
+    firestoreOrdersReady,
     addReview,
     deleteReview,
     updateBranchSettings,

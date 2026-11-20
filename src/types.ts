@@ -183,6 +183,7 @@ export interface CartItem {
 
 export interface OnlineOrder {
   id: string;
+  firestoreDocId?: string;
   branchId?: BranchId;
   customerId?: string;
   customerName: string;

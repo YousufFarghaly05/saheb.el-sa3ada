@@ -1,34 +1,17 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+} from 'firebase/auth';
 import type { CustomerUser, AuthSession } from '../types.ts';
+import { auth, isAdminEmail } from '../firebase.ts';
 
 const CUSTOMER_STORAGE_KEY = 'saheb_elsaada_customer_session_v2';
-const ADMIN_STORAGE_KEY = 'saheb_elsaada_admin_session_v2';
-const ADMIN_CREDENTIALS_KEY = 'saheb_elsaada_admin_credentials_v2';
 const GUEST_FAVORITES_KEY = 'saheb_elsaada_guest_favorites_v1';
 
-const DEFAULT_ADMIN_CREDENTIALS: StoredAdminCredentials = {
-  username: 'admin',
-  password: 'admin123',
-};
-
-interface StoredAdminCredentials {
-  username: string;
-  password: string;
-}
-
-function getStoredAdminCredentials(): StoredAdminCredentials | null {
-  try {
-    const raw = localStorage.getItem(ADMIN_CREDENTIALS_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<StoredAdminCredentials>;
-    if (parsed.username && parsed.password) {
-      return { username: parsed.username, password: parsed.password };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
+const NON_ADMIN_ERROR_AR = 'عذراً، هذا الحساب لا يملك صلاحيات الإدارة';
+const INVALID_CREDENTIALS_ERROR_AR = 'البريد الإلكتروني أو كلمة المرور غير صحيحة';
 
 export function useAuth() {
   const [customer, setCustomer] = useState<CustomerUser | null>(() => {
@@ -40,14 +23,9 @@ export function useAuth() {
     }
   });
 
-  const [adminSession, setAdminSession] = useState<AuthSession | null>(() => {
-    try {
-      const raw = localStorage.getItem(ADMIN_STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch {
-      return null;
-    }
-  });
+  const [adminSession, setAdminSession] = useState<AuthSession | null>(null);
+  const [adminAuthReady, setAdminAuthReady] = useState<boolean>(false);
+  const [firebaseNonAdminEmail, setFirebaseNonAdminEmail] = useState<string | null>(null);
 
   const [guestFavorites, setGuestFavorites] = useState<string[]>(() => {
     try {
@@ -60,6 +38,43 @@ export function useAuth() {
 
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Clean up any legacy localStorage admin session/credential keys from previous builds
+  useEffect(() => {
+    try {
+      localStorage.removeItem('saheb_elsaada_admin_session_v2');
+      localStorage.removeItem('saheb_elsaada_admin_credentials_v1');
+      localStorage.removeItem('saheb_elsaada_admin_credentials_v2');
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  // Strictly verify Admin session via Firebase Authentication onAuthStateChanged
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        if (isAdminEmail(firebaseUser.email)) {
+          setAdminSession({
+            token: firebaseUser.uid,
+            role: 'admin',
+            adminUsername: firebaseUser.email || '',
+          });
+          setFirebaseNonAdminEmail(null);
+          setAuthError(null);
+        } else {
+          setAdminSession(null);
+          setFirebaseNonAdminEmail(firebaseUser.email || 'unknown');
+        }
+      } else {
+        setAdminSession(null);
+        setFirebaseNonAdminEmail(null);
+      }
+      setAdminAuthReady(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const loginCustomer = useCallback(async (identifier: string, password: string): Promise<boolean> => {
     setAuthLoading(true);
@@ -204,95 +219,74 @@ export function useAuth() {
     localStorage.removeItem(CUSTOMER_STORAGE_KEY);
   }, []);
 
-  const loginAdmin = useCallback(async (username: string, password: string): Promise<boolean> => {
+  const loginAdmin = useCallback(async (email: string, password: string): Promise<boolean> => {
     setAuthLoading(true);
     setAuthError(null);
 
-    const activeCreds = getStoredAdminCredentials() ?? DEFAULT_ADMIN_CREDENTIALS;
-    const inputUser = username.trim().toLowerCase();
-
-    if (inputUser === activeCreds.username.toLowerCase() && password === activeCreds.password) {
-      const session: AuthSession = {
-        token: `local-admin-${Date.now()}`,
-        role: 'admin',
-        adminUsername: activeCreds.username,
-      };
-      setAdminSession(session);
-      try {
-        localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(session));
-      } catch {
-        // ignore storage quota errors
-      }
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      setAuthError(INVALID_CREDENTIALS_ERROR_AR);
       setAuthLoading(false);
-      return true;
+      return false;
     }
 
-    setAuthError('بيانات دخول الإدارة غير صحيحة');
-    setAuthLoading(false);
-    return false;
+    try {
+      const credential = await signInWithEmailAndPassword(auth, trimmedEmail, password);
+      const signedInEmail = credential.user.email;
+
+      if (!isAdminEmail(signedInEmail)) {
+        await signOut(auth).catch(() => {});
+        setAdminSession(null);
+        setAuthError(NON_ADMIN_ERROR_AR);
+        setAuthLoading(false);
+        return false;
+      }
+
+      setAdminSession({
+        token: credential.user.uid,
+        role: 'admin',
+        adminUsername: signedInEmail || '',
+      });
+      setFirebaseNonAdminEmail(null);
+      setAuthLoading(false);
+      return true;
+    } catch (err: unknown) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+
+      if (code === 'auth/too-many-requests') {
+        setAuthError('تم تجاوز عدد محاولات الدخول المسموح بها مؤقتاً. يرجى المحاولة بعد قليل.');
+      } else if (code === 'auth/network-request-failed') {
+        setAuthError('تعذر الاتصال بخدمة المصادقة. يرجى التحقق من الاتصال بالإنترنت.');
+      } else {
+        setAuthError(INVALID_CREDENTIALS_ERROR_AR);
+      }
+
+      setAdminSession(null);
+      setAuthLoading(false);
+      return false;
+    }
   }, []);
 
-  const updateAdminCredentials = useCallback(
-    (payload: {
-      currentPassword: string;
-      newUsername: string;
-      newPassword: string;
-    }): { ok: boolean; error?: string } => {
-      const existing = getStoredAdminCredentials() ?? DEFAULT_ADMIN_CREDENTIALS;
-      if (payload.currentPassword !== existing.password) {
-        return {
-          ok: false,
-          error: 'كلمة المرور الحالية غير صحيحة.',
-        };
-      }
-      const cleanUser = payload.newUsername.trim();
-      if (cleanUser.length < 3) {
-        return {
-          ok: false,
-          error: 'يجب أن يكون اسم المستخدم ٣ أحرف على الأقل.',
-        };
-      }
-      if (payload.newPassword.length < 4) {
-        return {
-          ok: false,
-          error: 'يجب أن تكون كلمة المرور الجديدة ٤ أحرف على الأقل.',
-        };
-      }
-
-      const nextCreds: StoredAdminCredentials = {
-        username: cleanUser,
-        password: payload.newPassword,
-      };
-      try {
-        localStorage.setItem(ADMIN_CREDENTIALS_KEY, JSON.stringify(nextCreds));
-      } catch {
-        return { ok: false, error: 'تعذر الحفظ في المتصفح.' };
-      }
-
-      setAdminSession((prev) => {
-        if (!prev) return prev;
-        const updated: AuthSession = { ...prev, adminUsername: cleanUser };
-        try {
-          localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(updated));
-        } catch {
-          // ignore
-        }
-        return updated;
-      });
-
-      return { ok: true };
-    },
-    []
-  );
-
-  const logoutAdmin = useCallback(() => {
-    setAdminSession(null);
-    localStorage.removeItem(ADMIN_STORAGE_KEY);
+  const logoutAdmin = useCallback(async () => {
+    try {
+      await signOut(auth);
+    } catch {
+      // ignore signOut errors
+    } finally {
+      setAdminSession(null);
+      setFirebaseNonAdminEmail(null);
+      setAuthError(null);
+    }
   }, []);
 
   return {
     customer,
     adminSession,
+    adminAuthReady,
+    firebaseNonAdminEmail,
     favoriteIds,
     toggleFavoriteDish,
     authError,
@@ -303,7 +297,6 @@ export function useAuth() {
     updateCustomerProfile,
     logoutCustomer,
     loginAdmin,
-    updateAdminCredentials,
     logoutAdmin,
   };
 }

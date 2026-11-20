@@ -93,8 +93,27 @@ export function App() {
   const noticeTimerRef = useRef<number | null>(null);
 
   const {
+    customer,
+    adminSession,
+    adminAuthReady,
+    firebaseNonAdminEmail,
+    favoriteIds,
+    toggleFavoriteDish,
+    authError,
+    setAuthError,
+    authLoading,
+    loginCustomer,
+    signupCustomer,
+    updateCustomerProfile,
+    logoutCustomer,
+    loginAdmin,
+    logoutAdmin,
+  } = useAuth();
+
+  const {
     stores,
     reviews,
+    firestoreOrdersReady,
     addReview,
     deleteReview,
     updateBranchSettings,
@@ -118,24 +137,7 @@ export function App() {
     rateOrder,
     deleteOrder,
     resetBranchDefaults,
-  } = useRestaurantStore();
-
-  const {
-    customer,
-    adminSession,
-    favoriteIds,
-    toggleFavoriteDish,
-    authError,
-    setAuthError,
-    authLoading,
-    loginCustomer,
-    signupCustomer,
-    updateCustomerProfile,
-    logoutCustomer,
-    loginAdmin,
-    logoutAdmin,
-    updateAdminCredentials,
-  } = useAuth();
+  } = useRestaurantStore({ isAdminAuthenticated: Boolean(adminSession) });
 
   useEffect(() => {
     document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
@@ -399,11 +401,15 @@ export function App() {
           cmsSettings={adminStore.cmsSettings}
           onUpdateCmsSettings={(settings) => updateCmsSettings(adminBranch, settings)}
           adminSession={adminSession}
+          adminAuthReady={adminAuthReady}
+          customer={customer}
+          firebaseNonAdminEmail={firebaseNonAdminEmail}
+          firestoreOrdersReady={firestoreOrdersReady}
           authError={authError}
           authLoading={authLoading}
           onAdminLogin={loginAdmin}
           onAdminLogout={logoutAdmin}
-          onUpdateAdminCredentials={updateAdminCredentials}
+          onLogoutCustomer={logoutCustomer}
           menu={adminStore.menu}
           shows={adminStore.shows}
           gallery={adminStore.gallery}

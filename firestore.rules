@@ -1,0 +1,70 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email != null
+        && request.auth.token.email == 'mohamedrady00008@gmail.com';
+    }
+
+    function isValidBranchId(branchId) {
+      return branchId in ['branch_tagamoa', 'branch_moez', 'branch_zayed'];
+    }
+
+    // Orders: Any customer (guest or logged-in) can create an order;
+    // only the verified Firebase Admin can read, list, update, or permanently delete orders.
+    match /orders/{orderId} {
+      allow create: if request.resource.data.keys().hasAll([
+          'branchId',
+          'customerName',
+          'phone',
+          'serviceType',
+          'items',
+          'totalAmount',
+          'status',
+          'createdAt'
+        ])
+        && isValidBranchId(request.resource.data.branchId)
+        && request.resource.data.customerName is string
+        && request.resource.data.customerName.size() > 0
+        && request.resource.data.customerName.size() <= 160
+        && request.resource.data.phone is string
+        && request.resource.data.phone.size() >= 6
+        && request.resource.data.phone.size() <= 30
+        && request.resource.data.serviceType in ['delivery', 'takeaway']
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.items.size() <= 100
+        && request.resource.data.totalAmount is number
+        && request.resource.data.totalAmount >= 0
+        && request.resource.data.status == 'pending';
+
+      allow read, update, delete: if isAdmin();
+    }
+
+    // Branch Menus: Public read for all customers; Admin-only write.
+    match /branch_menus/{branchId} {
+      allow read: if isValidBranchId(branchId);
+      allow write: if isAdmin() && isValidBranchId(branchId);
+    }
+
+    // Branch Offers, Announcements & Settings: Public read; Admin-only write.
+    match /branch_offers/{branchId} {
+      allow read: if isValidBranchId(branchId);
+      allow write: if isAdmin() && isValidBranchId(branchId);
+    }
+
+    // Branch Gallery: Public read; Admin-only write.
+    match /branch_gallery/{branchId} {
+      allow read: if isValidBranchId(branchId);
+      allow write: if isAdmin() && isValidBranchId(branchId);
+    }
+
+    // Default deny for all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

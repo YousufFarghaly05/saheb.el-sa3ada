@@ -23,8 +23,6 @@ import {
   Camera,
   Building2,
   KeyRound,
-  Eye,
-  EyeOff,
   Phone,
   Search,
   Megaphone,
@@ -49,6 +47,7 @@ import type {
   BranchContactSettings,
   BranchId,
   CustomerReview,
+  CustomerUser,
   DualBranchStoreState,
   GalleryCategory,
   GalleryPhoto,
@@ -84,15 +83,15 @@ interface AdminDashboardProps {
   cmsSettings?: Partial<BranchCmsSettings>;
   onUpdateCmsSettings: (settings: Partial<BranchCmsSettings>) => void;
   adminSession: AuthSession | null;
+  adminAuthReady?: boolean;
+  customer?: CustomerUser | null;
+  firebaseNonAdminEmail?: string | null;
+  firestoreOrdersReady?: boolean;
   authError: string | null;
   authLoading: boolean;
-  onAdminLogin: (username: string, password: string) => Promise<boolean>;
-  onAdminLogout: () => void;
-  onUpdateAdminCredentials: (payload: {
-    currentPassword: string;
-    newUsername: string;
-    newPassword: string;
-  }) => { ok: boolean; error?: string };
+  onAdminLogin: (email: string, password: string) => Promise<boolean>;
+  onAdminLogout: () => void | Promise<void>;
+  onLogoutCustomer?: () => void;
   menu: MenuItem[];
   shows: ShowSchedule[];
   gallery: GalleryPhoto[];
@@ -184,11 +183,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   cmsSettings,
   onUpdateCmsSettings,
   adminSession,
+  adminAuthReady = true,
+  customer = null,
+  firebaseNonAdminEmail = null,
+  firestoreOrdersReady = true,
   authError,
   authLoading,
   onAdminLogin,
   onAdminLogout,
-  onUpdateAdminCredentials,
+  onLogoutCustomer,
   menu,
   shows,
   gallery,
@@ -228,18 +231,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [qrCopied, setQrCopied] = useState(false);
   const [qrNotice, setQrNotice] = useState<string | null>(null);
 
-  // Login Gate State
-  const [username, setUsername] = useState('');
+  // Login Gate State (Firebase Email/Password Auth)
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
-  // Security Settings Form State
-  const [secCurrentPassword, setSecCurrentPassword] = useState('');
-  const [secNewUsername, setSecNewUsername] = useState(adminSession?.adminUsername || 'admin');
-  const [secNewPassword, setSecNewPassword] = useState('');
-  const [secConfirmPassword, setSecConfirmPassword] = useState('');
-  const [secError, setSecError] = useState<string | null>(null);
-  const [secSuccess, setSecSuccess] = useState<string | null>(null);
-  const [secShowPasswords, setSecShowPasswords] = useState(false);
+  // Permanent Order Delete Confirmation Modal State
+  const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<OnlineOrder | null>(null);
 
   // Branch Contact / WhatsApp Settings State
   const [bPhone, setBPhone] = useState(branchConfig.phone);
@@ -286,6 +283,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [orderSoundEnabled]);
 
   useEffect(() => {
+    if (!adminSession || !firestoreOrdersReady) {
+      seenOrderIdsRef.current = null;
+      return;
+    }
+
     const allOrders: Array<{ branchId: BranchId; order: OnlineOrder }> = [];
     BRANCH_ORDER.forEach((bId) => {
       (stores[bId]?.orders || []).forEach((order) => {
@@ -305,11 +307,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (newlyArrived.length > 0) {
       newlyArrived.forEach((entry) => seenOrderIdsRef.current!.add(entry.order.id));
       setIncomingOrderAlerts((prev) => [...newlyArrived, ...prev].slice(0, 6));
-      if (adminSession && orderSoundEnabled) {
+      if (orderSoundEnabled) {
         playOrderNotificationChime();
       }
     }
-  }, [stores, adminSession, orderSoundEnabled]);
+  }, [stores, adminSession, firestoreOrdersReady, orderSoundEnabled]);
 
   // Menu Form & Reservations Filter State
   const [menuAdminSearch, setMenuAdminSearch] = useState('');
@@ -495,11 +497,89 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     unlockAudioContext();
-    await onAdminLogin(username, password);
+    const ok = await onAdminLogin(email, password);
+    if (ok) {
+      setPassword('');
+    }
   };
 
   // --- Protected Login Gate if not authenticated ---
+  if (!adminAuthReady) {
+    return (
+      <section className="min-h-[82vh] py-16 bg-[#121212] flex items-center justify-center px-4">
+        <div className="max-w-md w-full bg-[#1E1E1E] border border-[#D4AF37]/50 p-8 shadow-2xl text-center space-y-4">
+          <div className="w-12 h-12 bg-[#121212] border border-[#D4AF37] text-[#D4AF37] mx-auto flex items-center justify-center animate-pulse">
+            <Lock className="w-5 h-5" />
+          </div>
+          <p className="text-sm text-[#C9C1B1]">
+            {lang === 'ar'
+              ? 'جاري التحقق من صلاحيات الإدارة...'
+              : 'Verifying administrator session...'}
+          </p>
+        </div>
+      </section>
+    );
+  }
+
   if (!adminSession) {
+    const isBlockedNonAdminAccount = Boolean(customer) || Boolean(firebaseNonAdminEmail);
+
+    if (isBlockedNonAdminAccount) {
+      return (
+        <section className="min-h-[82vh] py-16 bg-[#121212] flex items-center justify-center px-4">
+          <div className="max-w-md w-full bg-[#1E1E1E] border border-red-500/60 p-6 sm:p-8 shadow-2xl space-y-6 text-center">
+            <div className="w-14 h-14 bg-red-950/60 border border-red-500/70 text-red-400 mx-auto flex items-center justify-center">
+              <AlertTriangle className="w-7 h-7" />
+            </div>
+
+            <div className="space-y-2">
+              <h1 className="font-display-serif text-xl sm:text-2xl font-bold text-[#F7F3E9]">
+                {lang === 'ar' ? 'الوصول محظور' : 'Access Restricted'}
+              </h1>
+              <div className="p-4 bg-red-950/50 border border-red-500/40 text-red-200 text-sm font-bold leading-relaxed">
+                عذراً، هذا الحساب لا يملك صلاحيات الإدارة
+              </div>
+              <p className="text-xs text-[#C9C1B1] leading-relaxed">
+                {lang === 'ar'
+                  ? 'لوحة التحكم متاحة فقط لحساب إدارة المطعم المعتمد. يرجى العودة للموقع أو تسجيل الخروج من حساب العميل أولاً.'
+                  : 'The Admin Dashboard is restricted to the authorized restaurant administrator account only.'}
+              </p>
+            </div>
+
+            <div className="space-y-2.5 pt-2">
+              <button
+                type="button"
+                onClick={onExitAdmin}
+                className="w-full py-3 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold text-sm transition-colors cursor-pointer"
+              >
+                {t.backToSite}
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (customer && onLogoutCustomer) {
+                    onLogoutCustomer();
+                  }
+                  if (firebaseNonAdminEmail) {
+                    await onAdminLogout();
+                  }
+                }}
+                className="w-full py-2.5 bg-[#121212] border border-[#D4AF37]/35 hover:border-[#D4AF37] text-[#C9C1B1] hover:text-[#F7F3E9] text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>
+                  {lang === 'ar'
+                    ? 'تسجيل الخروج من الحساب الحالي للدخول كمسؤول'
+                    : 'Sign out current account to sign in as admin'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </section>
+      );
+    }
+
     return (
       <section className="min-h-[82vh] py-16 bg-[#121212] flex items-center justify-center px-4">
         <div className="max-w-md w-full bg-[#1E1E1E] border border-[#D4AF37] p-6 sm:p-8 shadow-2xl space-y-6">
@@ -516,7 +596,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           {authError && (
-            <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs text-center">
+            <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs font-bold text-center">
               {authError}
             </div>
           )}
@@ -525,11 +605,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div>
               <label className="block text-xs text-[#C9C1B1] mb-1.5">{authT.usernameLabel}</label>
               <input
-                type="text"
+                type="email"
                 required
+                autoComplete="email"
                 dir="ltr"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder={authT.usernamePlaceholder}
                 className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
               />
@@ -540,32 +621,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <input
                 type="password"
                 required
+                autoComplete="current-password"
                 dir="ltr"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••"
+                placeholder="••••••••"
                 className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
               />
-            </div>
-
-            <div className="p-3 bg-[#121212] border border-[#D4AF37]/25 text-[11px] text-[#D4AF37] flex items-center justify-between gap-2">
-              <span>{authT.adminDemoHint}</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setUsername('admin');
-                  setPassword('admin123');
-                }}
-                className="px-2 py-1 bg-[#D4AF37]/20 border border-[#D4AF37]/40 text-[#F7F3E9] font-bold cursor-pointer shrink-0"
-              >
-                {lang === 'ar' ? 'تعبئة تلقائية' : 'Auto-fill'}
-              </button>
             </div>
 
             <button
               type="submit"
               disabled={authLoading}
-              className="w-full py-3.5 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold text-sm transition-colors cursor-pointer"
+              className="w-full py-3.5 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-60 text-[#121212] font-bold text-sm transition-colors cursor-pointer"
             >
               {authLoading ? '...' : authT.adminLoginBtn}
             </button>
@@ -846,33 +914,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setGTitleAr('');
     setGTitleEn('');
     setGAssignMenuId('');
-  };
-
-  const handleSecuritySubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setSecError(null);
-    setSecSuccess(null);
-
-    if (secNewPassword !== secConfirmPassword) {
-      setSecError(t.securityForm.mismatchError);
-      return;
-    }
-
-    const res = onUpdateAdminCredentials({
-      currentPassword: secCurrentPassword,
-      newUsername: secNewUsername,
-      newPassword: secNewPassword,
-    });
-
-    if (!res.ok) {
-      setSecError(res.error || 'Error');
-      return;
-    }
-
-    setSecCurrentPassword('');
-    setSecNewPassword('');
-    setSecConfirmPassword('');
-    setSecSuccess(t.securityForm.savedSuccess);
   };
 
   const handleBranchSettingsSubmit = (e: React.FormEvent) => {
@@ -1446,11 +1487,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <button
             type="button"
-            onClick={() => {
-              setSecError(null);
-              setSecSuccess(null);
-              setActiveTab('security');
-            }}
+            onClick={() => setActiveTab('security')}
             className={`p-4 border text-right flex items-center justify-between transition-all cursor-pointer ${
               activeTab === 'security'
                 ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37] font-bold'
@@ -2592,8 +2629,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       <button
                         type="button"
-                        onClick={() => onDeleteOrder(o.id)}
-                        className="p-2 bg-[#121212] border border-red-500/40 text-red-400 hover:bg-red-500 hover:text-white cursor-pointer"
+                        onClick={() => setConfirmDeleteOrder(o)}
+                        title={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
+                        aria-label={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
+                        className="p-2 bg-[#121212] border border-red-500/40 text-red-400 hover:bg-red-500 hover:text-white cursor-pointer transition-colors"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -3297,7 +3336,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </form>
             </div>
 
-            {/* Admin Security Credentials */}
+            {/* Firebase Auth Admin Account Protection Card */}
             <div className="bg-[#1E1E1E] border border-[#D4AF37] p-6 sm:p-8 shadow-2xl space-y-6">
               <div className="flex items-start gap-3.5 border-b border-[#D4AF37]/25 pb-4">
                 <div className="w-11 h-11 bg-[#121212] border border-[#D4AF37] text-[#D4AF37] flex items-center justify-center shrink-0">
@@ -3313,104 +3352,86 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              {secError && (
-                <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs font-bold">
-                  {secError}
-                </div>
-              )}
-
-              {secSuccess && (
-                <div className="p-3 bg-[#10B981]/15 border border-[#10B981] text-[#10B981] text-xs font-bold flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>{secSuccess}</span>
-                </div>
-              )}
-
-              <form onSubmit={handleSecuritySubmit} className="space-y-4">
-                <div>
-                  <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                    {t.securityForm.currentPasswordLabel} *
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={secShowPasswords ? 'text' : 'password'}
-                      required
-                      dir="ltr"
-                      value={secCurrentPassword}
-                      onChange={(e) => setSecCurrentPassword(e.target.value)}
-                      placeholder="••••••"
-                      className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setSecShowPasswords((prev) => !prev)}
-                      aria-label="Toggle password visibility"
-                      className="absolute inset-y-0 right-2.5 flex items-center text-[#9E9585] hover:text-[#D4AF37] cursor-pointer"
-                    >
-                      {secShowPasswords ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                    {t.securityForm.newUsernameLabel} *
-                  </label>
-                  <input
-                    type="text"
-                    required
+              <div className="bg-[#121212] border border-[#D4AF37]/30 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-xs text-[#9E9585]">
+                    {t.securityForm.newUsernameLabel}
+                  </span>
+                  <span
                     dir="ltr"
-                    value={secNewUsername}
-                    onChange={(e) => setSecNewUsername(e.target.value)}
-                    placeholder="admin"
-                    className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                  />
+                    className="text-sm font-mono font-bold text-[#D4AF37]"
+                  >
+                    {adminSession.adminUsername}
+                  </span>
                 </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                      {t.securityForm.newPasswordLabel} *
-                    </label>
-                    <input
-                      type={secShowPasswords ? 'text' : 'password'}
-                      required
-                      dir="ltr"
-                      value={secNewPassword}
-                      onChange={(e) => setSecNewPassword(e.target.value)}
-                      placeholder="••••••"
-                      className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                      {t.securityForm.confirmPasswordLabel} *
-                    </label>
-                    <input
-                      type={secShowPasswords ? 'text' : 'password'}
-                      required
-                      dir="ltr"
-                      value={secConfirmPassword}
-                      onChange={(e) => setSecConfirmPassword(e.target.value)}
-                      placeholder="••••••"
-                      className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/40 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                    />
-                  </div>
+                <div className="flex items-center gap-2 text-xs text-[#10B981] font-bold">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>{t.securityForm.savedSuccess}</span>
                 </div>
+              </div>
 
-                <button
-                  type="submit"
-                  className="w-full py-3.5 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                >
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>{t.securityForm.saveBtn}</span>
-                </button>
-              </form>
+              <button
+                type="button"
+                onClick={() => onAdminLogout()}
+                className="w-full py-3.5 bg-red-600/20 hover:bg-red-600 border border-red-500/60 text-red-200 hover:text-white font-bold text-sm flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>{lang === 'ar' ? 'تسجيل الخروج' : 'Sign Out'}</span>
+              </button>
             </div>
           </div>
         )}
       </div>
+
+      {/* Permanent Order Deletion Confirmation Modal */}
+      {confirmDeleteOrder && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div className="max-w-md w-full bg-[#1E1E1E] border border-red-500/60 p-6 shadow-2xl space-y-5">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 bg-red-950/70 border border-red-500/60 text-red-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-bold text-base sm:text-lg text-[#F7F3E9]">
+                  {lang === 'ar'
+                    ? 'تأكيد حذف الطلب نهائياً'
+                    : 'Confirm Permanent Order Deletion'}
+                </h3>
+                <p className="text-xs sm:text-sm text-[#C9C1B1] leading-relaxed">
+                  {lang === 'ar'
+                    ? `هل أنت متأكد من حذف طلب "${confirmDeleteOrder.customerName}" بقيمة ${confirmDeleteOrder.totalAmount} ج.م نهائياً من قاعدة البيانات؟ لا يمكن التراجع عن هذا الإجراء.`
+                    : `Are you sure you want to permanently delete the order from "${confirmDeleteOrder.customerName}" (${confirmDeleteOrder.totalAmount} EGP) from Firestore? This cannot be undone.`}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#D4AF37]/20">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteOrder(null)}
+                className="px-4 py-2.5 bg-[#121212] border border-[#D4AF37]/30 hover:border-[#D4AF37] text-[#C9C1B1] hover:text-[#F7F3E9] text-xs font-bold cursor-pointer transition-colors"
+              >
+                {lang === 'ar' ? 'إلغاء' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDeleteOrder(confirmDeleteOrder.id);
+                  setConfirmDeleteOrder(null);
+                }}
+                className="px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{lang === 'ar' ? 'حذف نهائياً' : 'Delete Permanently'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 };

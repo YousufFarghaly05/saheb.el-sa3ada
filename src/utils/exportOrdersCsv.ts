@@ -1,16 +1,19 @@
 import type { BranchConfig, Lang, OnlineOrder } from '../types.ts';
 
-function sanitizeCsvCell(value: string | number | undefined | null): string {
-  if (value === undefined || value === null) return '';
-  let str = String(value).replace(/\r?\n/g, ' ').trim();
-  // Prevent spreadsheet formula injection while preserving pure numeric values
-  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(str)) {
+function formatCsvTextCell(value: string | number | undefined | null): string {
+  if (value === undefined || value === null) return '""';
+  let str = String(value).replace(/\r\n|\r|\n/g, ' ').trim();
+  // Neutralize spreadsheet formula injection on text cells
+  if (/^[=+\-@\t]/.test(str)) {
     str = `'${str}`;
   }
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
+  const escaped = str.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+function formatCsvNumericCell(value: number | undefined | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '0';
+  return String(value);
 }
 
 export function exportOrdersToCsv(
@@ -113,7 +116,9 @@ export function exportOrdersToCsv(
 
     const createdDate = (() => {
       const d = new Date(order.createdAt);
-      return Number.isNaN(d.getTime()) ? order.createdAt : d.toISOString().replace('T', ' ').slice(0, 19);
+      return Number.isNaN(d.getTime())
+        ? order.createdAt
+        : d.toISOString().replace('T', ' ').slice(0, 19);
     })();
 
     const serviceLabel =
@@ -127,32 +132,34 @@ export function exportOrdersToCsv(
 
     const grandTotalWithTaxes = Math.round(order.totalAmount * 1.12 * 1.14);
 
-    const cells: Array<string | number | undefined> = [
-      order.id,
-      branchName,
-      createdDate,
-      order.customerName,
-      order.phone,
-      serviceLabel,
-      order.address,
-      order.requestedTime,
-      itemsSummary,
-      order.totalAmount,
-      grandTotalWithTaxes,
-      paymentMethodLabels[order.paymentMethod] || order.paymentMethod,
-      paymentStatusLabels[order.paymentStatus] || order.paymentStatus,
-      order.transferSender || '',
-      (isAr ? statusLabelsAr[order.status] : statusLabelsEn[order.status]) || order.status,
-      order.notes || '',
-      order.cancellationReason || '',
-      order.rating ? `${order.rating}/5` : '',
-    ];
-
-    return cells.map(sanitizeCsvCell).join(',');
+    return [
+      formatCsvTextCell(order.id),
+      formatCsvTextCell(branchName),
+      formatCsvTextCell(createdDate),
+      formatCsvTextCell(order.customerName),
+      formatCsvTextCell(order.phone),
+      formatCsvTextCell(serviceLabel),
+      formatCsvTextCell(order.address),
+      formatCsvTextCell(order.requestedTime),
+      formatCsvTextCell(itemsSummary),
+      formatCsvNumericCell(order.totalAmount),
+      formatCsvNumericCell(grandTotalWithTaxes),
+      formatCsvTextCell(paymentMethodLabels[order.paymentMethod] || order.paymentMethod),
+      formatCsvTextCell(paymentStatusLabels[order.paymentStatus] || order.paymentStatus),
+      formatCsvTextCell(order.transferSender || ''),
+      formatCsvTextCell(
+        (isAr ? statusLabelsAr[order.status] : statusLabelsEn[order.status]) || order.status
+      ),
+      formatCsvTextCell(order.notes || ''),
+      formatCsvTextCell(order.cancellationReason || ''),
+      formatCsvTextCell(order.rating ? `${order.rating}/5` : ''),
+    ].join(',');
   });
 
-  // Prepend UTF-8 BOM so Excel renders Arabic text cleanly
-  const csvContent = '\uFEFF' + [headers.map(sanitizeCsvCell).join(','), ...rows].join('\r\n');
+  // Prepend UTF-8 BOM (\uFEFF) so Microsoft Excel renders Arabic text cleanly,
+  // and separate every order strictly onto its own row using \r\n.
+  const headerLine = headers.map(formatCsvTextCell).join(',');
+  const csvContent = '\uFEFF' + [headerLine, ...rows].join('\r\n');
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
 
