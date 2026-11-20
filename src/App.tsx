@@ -19,6 +19,7 @@ import { Footer } from './components/Footer.tsx';
 import { ScrollToTopButton } from './components/ScrollToTopButton.tsx';
 import { OfflineIndicator } from './components/OfflineIndicator.tsx';
 import { playOrderNotificationChime } from './utils/orderAlertSound.ts';
+import { exportOrdersToCsv } from './utils/exportOrdersCsv.ts';
 
 const ACTIVE_BRANCH_KEY = 'saheb_elsaada_active_branch';
 const CART_STORAGE_KEY = 'saheb_elsaada_cart_v1';
@@ -426,6 +427,7 @@ export function App() {
             acknowledgeOrderCancellation(branchId, orderId)
           }
           onDeleteOrder={(id) => deleteOrder(adminBranch, id)}
+          onExportOrdersCsv={() => exportOrdersToCsv(adminStore.orders, adminBranchConfig, lang)}
           reviews={reviews}
           onDeleteReview={deleteReview}
           onResetDefaults={() => resetBranchDefaults(adminBranch)}

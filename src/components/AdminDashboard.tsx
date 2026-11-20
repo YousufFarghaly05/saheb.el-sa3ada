@@ -112,6 +112,7 @@ interface AdminDashboardProps {
   onUpdateOrderStatus: (id: string, status: BookingStatus) => void;
   onAcknowledgeOrderCancellation?: (branchId: BranchId, orderId: string) => void;
   onDeleteOrder: (id: string) => void;
+  onExportOrdersCsv?: () => boolean;
   reviews: CustomerReview[];
   onDeleteReview: (id: string) => void;
   onResetDefaults: () => void;
@@ -207,6 +208,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onUpdateOrderStatus,
   onAcknowledgeOrderCancellation,
   onDeleteOrder,
+  onExportOrdersCsv,
   reviews = [],
   onDeleteReview,
   onResetDefaults,
@@ -2431,7 +2433,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     type="button"
                     disabled={orders.length === 0}
                     onClick={() => {
-                      const exported = exportOrdersToCsv(orders, branchConfig, lang);
+                      const exported = onExportOrdersCsv
+                        ? onExportOrdersCsv()
+                        : exportOrdersToCsv(orders, branchConfig, lang);
                       if (exported) {
                         setCsvExported(true);
                         window.setTimeout(() => setCsvExported(false), 2500);

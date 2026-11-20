@@ -32,7 +32,8 @@ export function exportOrdersToCsv(
         'العنوان',
         'الموعد المطلوب',
         'الأصناف',
-        'الإجمالي (ج.م)',
+        'المجموع الفرعي (ج.م)',
+        'الإجمالي شامل الخدمة والضريبة (ج.م)',
         'طريقة الدفع',
         'حالة الدفع',
         'رقم/حساب التحويل',
@@ -51,7 +52,8 @@ export function exportOrdersToCsv(
         'Address',
         'Requested Time',
         'Items',
-        'Total (EGP)',
+        'Subtotal (EGP)',
+        'Grand Total incl. Service & VAT (EGP)',
         'Payment Method',
         'Payment Status',
         'Transfer Sender',
@@ -123,6 +125,8 @@ export function exportOrdersToCsv(
         ? 'استلام من الفرع'
         : 'Takeaway';
 
+    const grandTotalWithTaxes = Math.round(order.totalAmount * 1.12 * 1.14);
+
     const cells: Array<string | number | undefined> = [
       order.id,
       branchName,
@@ -134,6 +138,7 @@ export function exportOrdersToCsv(
       order.requestedTime,
       itemsSummary,
       order.totalAmount,
+      grandTotalWithTaxes,
       paymentMethodLabels[order.paymentMethod] || order.paymentMethod,
       paymentStatusLabels[order.paymentStatus] || order.paymentStatus,
       order.transferSender || '',
@@ -154,7 +159,7 @@ export function exportOrdersToCsv(
   const dateStamp = new Date().toISOString().slice(0, 10);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `orders-${branchConfig.id}-${dateStamp}.csv`;
+  link.download = `saheb-elsaada-orders-${branchConfig.id}-${dateStamp}.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
