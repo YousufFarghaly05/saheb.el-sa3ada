@@ -71,6 +71,7 @@ import { PRESET_IMAGE_OPTIONS } from '../data/mediaAssets.ts';
 import { ResilientImage } from './ResilientImage.tsx';
 import { BranchAnalyticsPanel } from './BranchAnalyticsPanel.tsx';
 import { playOrderNotificationChime, unlockAudioContext } from '../utils/orderAlertSound.ts';
+import { exportOrdersToCsv } from '../utils/exportOrdersCsv.ts';
 
 interface AdminDashboardProps {
   lang: Lang;
@@ -271,6 +272,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [incomingOrderAlerts, setIncomingOrderAlerts] = useState<
     Array<{ branchId: BranchId; order: OnlineOrder }>
   >([]);
+  const [csvExported, setCsvExported] = useState(false);
   const seenOrderIdsRef = useRef<Set<string> | null>(null);
 
   useEffect(() => {
@@ -2420,14 +2422,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="space-y-8">
             {/* Online Orders Section */}
             <div className="space-y-4">
-              <h3 className="font-bold text-lg text-[#D4AF37] border-b border-[#D4AF37]/25 pb-2 flex items-center justify-between gap-2 flex-wrap">
-                <span>
+              <div className="border-b border-[#D4AF37]/25 pb-2.5 flex items-center justify-between gap-3 flex-wrap">
+                <h3 className="font-bold text-lg text-[#D4AF37]">
                   {t.bookings.ordersTitle} — {activeBranchLabel} ({orders.length})
-                </span>
-                <span className="text-xs font-mono px-2.5 py-1 bg-[#1E1E1E] border border-[#D4AF37]/30 text-[#C9C1B1]">
-                  {branchConfig.phone}
-                </span>
-              </h3>
+                </h3>
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <button
+                    type="button"
+                    disabled={orders.length === 0}
+                    onClick={() => {
+                      const exported = exportOrdersToCsv(orders, branchConfig, lang);
+                      if (exported) {
+                        setCsvExported(true);
+                        window.setTimeout(() => setCsvExported(false), 2500);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-40 disabled:cursor-not-allowed text-[#121212] font-bold text-xs transition-colors cursor-pointer"
+                  >
+                    {csvExported ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 shrink-0" />
+                        <span>{t.bookings.exportCsvSuccess}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5 shrink-0" />
+                        <span>{t.bookings.exportCsvBtn}</span>
+                      </>
+                    )}
+                  </button>
+                  <span className="text-xs font-mono px-2.5 py-1.5 bg-[#1E1E1E] border border-[#D4AF37]/30 text-[#C9C1B1]">
+                    {branchConfig.phone}
+                  </span>
+                </div>
+              </div>
               {orders.length === 0 ? (
                 <div className="bg-[#1E1E1E] border border-[#D4AF37]/25 p-8 text-center text-[#9E9585] text-sm">
                   {t.bookings.emptyOrders}
