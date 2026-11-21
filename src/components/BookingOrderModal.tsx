@@ -24,8 +24,16 @@ import type {
   PaymentMethod,
   Reservation,
 } from '../types.ts';
+import { doc, getDoc } from 'firebase/firestore';
 import { BRANCH_CONFIGS, BRANCH_ORDER } from '../data/initialData.ts';
 import { getTranslations } from '../i18n/translations.ts';
+import { db, logFirestoreError, OperationType } from '../firebase.ts';
+import {
+  BLOCKED_PHONE_ERROR_AR,
+  EGYPTIAN_PHONE_ERROR_AR,
+  isValidEgyptianPhone,
+  normalizeEgyptianPhoneInput,
+} from '../utils/egyptianPhone.ts';
 
 interface BookingOrderModalProps {
   isOpen: boolean;
@@ -89,6 +97,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   const [transferSender, setTransferSender] = useState('');
   const [copiedField, setCopiedField] = useState<'vf' | 'instapay' | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isCheckingPhone, setIsCheckingPhone] = useState(false);
   const [submittedWhatsAppUrl, setSubmittedWhatsAppUrl] = useState<string | null>(null);
   const [submittedRefId, setSubmittedRefId] = useState<string | null>(null);
   const [submittedPaymentSummary, setSubmittedPaymentSummary] = useState<string>('');
@@ -98,12 +107,13 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
     setSubmittedWhatsAppUrl(null);
     setSubmittedRefId(null);
     setValidationError(null);
+    setIsCheckingPhone(false);
   }, [initialTab, isOpen, branchConfig.id]);
 
   useEffect(() => {
     if (customer) {
       setCustomerName(customer.name || '');
-      setPhone(customer.phone || '');
+      setPhone(normalizeEgyptianPhoneInput(customer.phone || ''));
       setAddress(customer.address || '');
     }
   }, [customer, isOpen]);
@@ -123,16 +133,23 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
     }, 1800);
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
+  const handleFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isCheckingPhone) return;
     setValidationError(null);
 
     if (!customerName.trim()) {
       setValidationError(t.validationName);
       return;
     }
-    if (!phone.trim()) {
-      setValidationError(t.validationPhone);
+
+    const cleanPhone = normalizeEgyptianPhoneInput(phone);
+    if (cleanPhone !== phone) {
+      setPhone(cleanPhone);
+    }
+
+    if (!isValidEgyptianPhone(cleanPhone)) {
+      setValidationError(EGYPTIAN_PHONE_ERROR_AR);
       return;
     }
 
@@ -150,11 +167,25 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
         return;
       }
 
+      // Check Firestore blockedPhones blacklist before placing the order
+      setIsCheckingPhone(true);
+      try {
+        const blockedSnap = await getDoc(doc(db, 'blockedPhones', cleanPhone));
+        if (blockedSnap.exists()) {
+          setValidationError(BLOCKED_PHONE_ERROR_AR);
+          return;
+        }
+      } catch (err) {
+        logFirestoreError(err, OperationType.GET, `blockedPhones/${cleanPhone}`);
+      } finally {
+        setIsCheckingPhone(false);
+      }
+
       const isTransfer = paymentMethod === 'instapay_vodafone';
       const createdOrder = onSubmitOrder({
         customerId: customer?.id,
         customerName: customerName.trim(),
-        phone: phone.trim(),
+        phone: cleanPhone,
         serviceType,
         address:
           serviceType === 'delivery'
@@ -207,7 +238,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
       const createdRes = onSubmitReservation({
         customerId: customer?.id,
         customerName: customerName.trim(),
-        phone: phone.trim(),
+        phone: cleanPhone,
         guests,
         date,
         time,
@@ -509,10 +540,15 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                   <label className="block text-xs text-[#C9C1B1] mb-1.5">{t.phoneLabel} *</label>
                   <input
                     type="tel"
+                    inputMode="numeric"
+                    maxLength={11}
                     required
                     dir="ltr"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
+                    onChange={(e) => {
+                      setPhone(normalizeEgyptianPhoneInput(e.target.value));
+                      if (validationError) setValidationError(null);
+                    }}
                     placeholder={t.phonePlaceholder}
                     className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
                   />
@@ -819,10 +855,16 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
 
               <button
                 type="submit"
-                disabled={activeTab === 'order' && cart.length === 0}
+                disabled={isCheckingPhone || (activeTab === 'order' && cart.length === 0)}
                 className="w-full py-4 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-40 text-[#121212] font-bold text-sm sm:text-base transition-colors cursor-pointer shadow-[0_0_25px_rgba(212,175,55,0.3)]"
               >
-                {activeTab === 'reservation' ? t.submitReserve : t.submitOrderNow}
+                {isCheckingPhone
+                  ? lang === 'ar'
+                    ? 'جاري التحقق من الرقم...'
+                    : 'Verifying phone...'
+                  : activeTab === 'reservation'
+                    ? t.submitReserve
+                    : t.submitOrderNow}
               </button>
             </form>
           )}

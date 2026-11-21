@@ -37,6 +37,11 @@ import type {
 import { getTranslations } from '../i18n/translations.ts';
 import { ResilientImage } from './ResilientImage.tsx';
 import { CustomerOrderMiniDashboard } from './CustomerOrderMiniDashboard.tsx';
+import {
+  EGYPTIAN_PHONE_ERROR_AR,
+  isValidEgyptianPhone,
+  normalizeEgyptianPhoneInput,
+} from '../utils/egyptianPhone.ts';
 
 interface CustomerAuthModalProps {
   isOpen: boolean;
@@ -221,9 +226,12 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
 
   // Profile edit state
   const [editName, setEditName] = useState(customer?.name || '');
-  const [editPhone, setEditPhone] = useState(customer?.phone || '');
+  const [editPhone, setEditPhone] = useState(
+    normalizeEgyptianPhoneInput(customer?.phone || '')
+  );
   const [editAddress, setEditAddress] = useState(customer?.address || '');
   const [savedNotice, setSavedNotice] = useState(false);
+  const [localPhoneError, setLocalPhoneError] = useState<string | null>(null);
 
   const pushToast = React.useCallback((toast: Omit<OrderStatusToast, 'id'>) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -236,10 +244,15 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   useEffect(() => {
     if (customer) {
       setEditName(customer.name);
-      setEditPhone(customer.phone);
+      setEditPhone(normalizeEgyptianPhoneInput(customer.phone || ''));
       setEditAddress(customer.address);
     }
+    setLocalPhoneError(null);
   }, [customer]);
+
+  useEffect(() => {
+    setLocalPhoneError(null);
+  }, [tab, accountSection, isOpen]);
 
   // Reset status tracker if customer changes
   useEffect(() => {
@@ -341,14 +354,32 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await onLogin(identifier, loginPassword);
+    setLocalPhoneError(null);
+    const cleanPhone = normalizeEgyptianPhoneInput(identifier);
+    if (cleanPhone !== identifier) {
+      setIdentifier(cleanPhone);
+    }
+    if (!isValidEgyptianPhone(cleanPhone)) {
+      setLocalPhoneError(EGYPTIAN_PHONE_ERROR_AR);
+      return;
+    }
+    await onLogin(cleanPhone, loginPassword);
   };
 
   const handleSignupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLocalPhoneError(null);
+    const cleanPhone = normalizeEgyptianPhoneInput(phone);
+    if (cleanPhone !== phone) {
+      setPhone(cleanPhone);
+    }
+    if (!isValidEgyptianPhone(cleanPhone)) {
+      setLocalPhoneError(EGYPTIAN_PHONE_ERROR_AR);
+      return;
+    }
     await onSignup({
       name,
-      phone,
+      phone: cleanPhone,
       address,
       password: signupPassword,
     });
@@ -357,10 +388,19 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   const handleProfileUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!customer) return;
+    setLocalPhoneError(null);
+    const cleanPhone = normalizeEgyptianPhoneInput(editPhone);
+    if (cleanPhone !== editPhone) {
+      setEditPhone(cleanPhone);
+    }
+    if (!isValidEgyptianPhone(cleanPhone)) {
+      setLocalPhoneError(EGYPTIAN_PHONE_ERROR_AR);
+      return;
+    }
     const ok = await onUpdateProfile({
       id: customer.id,
       name: editName,
-      phone: editPhone,
+      phone: cleanPhone,
       address: editAddress,
     });
     if (ok) {
@@ -576,6 +616,11 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                   onSubmit={handleProfileUpdate}
                   className="bg-[#121212] border border-[#D4AF37]/25 p-5 space-y-4"
                 >
+                  {(localPhoneError || authError) && (
+                    <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs">
+                      {localPhoneError || authError}
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-xs text-[#C9C1B1] mb-1">{t.nameLabel}</label>
@@ -591,10 +636,15 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                       <label className="block text-xs text-[#C9C1B1] mb-1">{t.phoneLabel}</label>
                       <input
                         type="tel"
+                        inputMode="numeric"
+                        maxLength={11}
                         required
                         dir="ltr"
                         value={editPhone}
-                        onChange={(e) => setEditPhone(e.target.value)}
+                        onChange={(e) => {
+                          setEditPhone(normalizeEgyptianPhoneInput(e.target.value));
+                          if (localPhoneError) setLocalPhoneError(null);
+                        }}
                         className="w-full px-3 py-2 bg-[#1E1E1E] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm"
                       />
                     </div>
@@ -1346,9 +1396,9 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                 </button>
               </div>
 
-              {authError && (
+              {(localPhoneError || authError) && (
                 <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs">
-                  {authError}
+                  {localPhoneError || authError}
                 </div>
               )}
 
@@ -1361,11 +1411,16 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                     <div className="relative">
                       <Phone className="w-4 h-4 text-[#D4AF37] absolute top-3 right-3" />
                       <input
-                        type="text"
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={11}
                         required
                         dir="ltr"
                         value={identifier}
-                        onChange={(e) => setIdentifier(e.target.value)}
+                        onChange={(e) => {
+                          setIdentifier(normalizeEgyptianPhoneInput(e.target.value));
+                          if (localPhoneError) setLocalPhoneError(null);
+                        }}
                         placeholder={t.identifierPlaceholder}
                         className="w-full pr-9 pl-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
                       />
@@ -1424,10 +1479,15 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                         <Phone className="w-4 h-4 text-[#D4AF37] absolute top-3 right-3" />
                         <input
                           type="tel"
+                          inputMode="numeric"
+                          maxLength={11}
                           required
                           dir="ltr"
                           value={phone}
-                          onChange={(e) => setPhone(e.target.value)}
+                          onChange={(e) => {
+                            setPhone(normalizeEgyptianPhoneInput(e.target.value));
+                            if (localPhoneError) setLocalPhoneError(null);
+                          }}
                           placeholder={t.identifierPlaceholder}
                           className="w-full pr-9 pl-3 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm"
                         />

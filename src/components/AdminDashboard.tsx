@@ -39,7 +39,17 @@ import {
   Volume2,
   VolumeX,
   Calendar,
+  Ban,
+  ShieldOff,
 } from 'lucide-react';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+} from 'firebase/firestore';
 import type {
   AuthSession,
   BookingStatus,
@@ -76,6 +86,8 @@ import {
   unlockAudioContext,
 } from '../utils/orderAlertSound.ts';
 import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
+import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
+import { normalizeEgyptianPhoneInput } from '../utils/egyptianPhone.ts';
 
 interface AdminDashboardProps {
   lang: Lang;
@@ -243,6 +255,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Permanent Order Delete Confirmation Modal State
   const [confirmDeleteOrder, setConfirmDeleteOrder] = useState<OnlineOrder | null>(null);
 
+  // Phone Blacklist (Firestore `blockedPhones` collection) State
+  const [blockedPhones, setBlockedPhones] = useState<
+    Array<{ phone: string; blockedAt: string | null }>
+  >([]);
+  const [confirmBlockTarget, setConfirmBlockTarget] = useState<{
+    phone: string;
+    customerName?: string;
+  } | null>(null);
+  const [blockingPhoneBusy, setBlockingPhoneBusy] = useState<string | null>(null);
+  const [blacklistError, setBlacklistError] = useState<string | null>(null);
+
   // Branch Contact / WhatsApp Settings State
   const [bPhone, setBPhone] = useState(branchConfig.phone);
   const [bWhatsappIntl, setBWhatsappIntl] = useState(branchConfig.whatsappIntl);
@@ -292,6 +315,108 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       // ignore storage errors
     }
   }, [orderSoundEnabled]);
+
+  // Real-time Firestore listener for blockedPhones — ONLY when admin is authenticated
+  useEffect(() => {
+    if (!adminSession || !isAdminEmail(auth.currentUser?.email)) {
+      setBlockedPhones([]);
+      setBlacklistError(null);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      collection(db, 'blockedPhones'),
+      (snapshot) => {
+        const parsed = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as {
+            phone?: unknown;
+            blockedAt?: { toDate?: () => Date } | string;
+          };
+          const phone =
+            typeof data.phone === 'string' && data.phone.trim()
+              ? normalizeEgyptianPhoneInput(data.phone) || data.phone.trim()
+              : docSnap.id;
+          let blockedAt: string | null = null;
+          if (typeof data.blockedAt === 'string') {
+            blockedAt = data.blockedAt;
+          } else if (data.blockedAt && typeof data.blockedAt.toDate === 'function') {
+            blockedAt = data.blockedAt.toDate().toISOString();
+          }
+          return { phone, blockedAt };
+        });
+
+        parsed.sort((a, b) => {
+          const ta = a.blockedAt ? new Date(a.blockedAt).getTime() : 0;
+          const tb = b.blockedAt ? new Date(b.blockedAt).getTime() : 0;
+          return tb - ta;
+        });
+
+        setBlockedPhones(parsed);
+        setBlacklistError(null);
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.LIST, 'blockedPhones');
+        setBlacklistError(
+          lang === 'ar'
+            ? 'تعذر تحميل قائمة الأرقام المحظورة.'
+            : 'Unable to load blocked phone numbers.'
+        );
+      }
+    );
+
+    return () => unsubscribe();
+  }, [adminSession, lang]);
+
+  const blockedPhoneSet = React.useMemo(
+    () => new Set(blockedPhones.map((item) => item.phone)),
+    [blockedPhones]
+  );
+
+  const handleConfirmBlockPhone = async (rawPhone: string) => {
+    if (!adminSession || !isAdminEmail(auth.currentUser?.email)) return;
+    const cleanPhone = normalizeEgyptianPhoneInput(rawPhone);
+    if (!cleanPhone) return;
+
+    setBlockingPhoneBusy(cleanPhone);
+    setBlacklistError(null);
+    try {
+      await setDoc(doc(db, 'blockedPhones', cleanPhone), {
+        phone: cleanPhone,
+        blockedAt: serverTimestamp(),
+      });
+      setConfirmBlockTarget(null);
+    } catch (error) {
+      logFirestoreError(error, OperationType.WRITE, `blockedPhones/${cleanPhone}`);
+      setBlacklistError(
+        lang === 'ar'
+          ? 'حدث خطأ أثناء حظر الرقم. يرجى المحاولة مرة أخرى.'
+          : 'Failed to block phone number. Please try again.'
+      );
+    } finally {
+      setBlockingPhoneBusy(null);
+    }
+  };
+
+  const handleUnblockPhone = async (rawPhone: string) => {
+    if (!adminSession || !isAdminEmail(auth.currentUser?.email)) return;
+    const cleanPhone = normalizeEgyptianPhoneInput(rawPhone) || rawPhone.trim();
+    if (!cleanPhone) return;
+
+    setBlockingPhoneBusy(cleanPhone);
+    setBlacklistError(null);
+    try {
+      await deleteDoc(doc(db, 'blockedPhones', cleanPhone));
+    } catch (error) {
+      logFirestoreError(error, OperationType.DELETE, `blockedPhones/${cleanPhone}`);
+      setBlacklistError(
+        lang === 'ar'
+          ? 'حدث خطأ أثناء فك حظر الرقم. يرجى المحاولة مرة أخرى.'
+          : 'Failed to unblock phone number. Please try again.'
+      );
+    } finally {
+      setBlockingPhoneBusy(null);
+    }
+  };
 
   useEffect(() => {
     if (!adminSession || !firestoreOrdersReady) {
@@ -2968,6 +3093,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         >
                           {o.phone}
                         </a>
+                        {(() => {
+                          const normalizedOrderPhone = normalizeEgyptianPhoneInput(o.phone);
+                          if (!normalizedOrderPhone) return null;
+                          const isBlocked = blockedPhoneSet.has(normalizedOrderPhone);
+                          const isBusy = blockingPhoneBusy === normalizedOrderPhone;
+                          return isBlocked ? (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => handleUnblockPhone(normalizedOrderPhone)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-emerald-950/60 hover:bg-emerald-900/70 border border-emerald-500/50 text-emerald-300 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <ShieldOff className="w-3 h-3" />
+                              <span>{isBusy ? '...' : 'فك الحظر'}</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() =>
+                                setConfirmBlockTarget({
+                                  phone: normalizedOrderPhone,
+                                  customerName: o.customerName,
+                                })
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold bg-red-950/50 hover:bg-red-600 border border-red-500/45 text-red-300 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <Ban className="w-3 h-3" />
+                              <span>حظر الرقم</span>
+                            </button>
+                          );
+                        })()}
                         <span className="text-[11px] text-[#9E9585] inline-flex items-center gap-1">
                           <Calendar className="w-3 h-3 text-[#D4AF37]/70" />
                           <span>{orderDateFormatted}</span>
@@ -3084,6 +3241,80 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   );
                 })
+              )}
+            </div>
+
+            {/* Blocked Phone Numbers Section (الأرقام المحظورة) */}
+            <div className="bg-[#1E1E1E] border border-red-500/35 p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#D4AF37]/20 pb-3">
+                <div className="flex items-center gap-2">
+                  <Ban className="w-4 h-4 text-red-400 shrink-0" />
+                  <h3 className="font-bold text-base text-[#F7F3E9]">
+                    الأرقام المحظورة ({blockedPhones.length})
+                  </h3>
+                </div>
+                <span className="text-[11px] text-[#9E9585]">
+                  {lang === 'ar'
+                    ? 'الأرقام المدرجة هنا لا يمكنها إتمام طلبات أونلاين جديدة'
+                    : 'Numbers listed here cannot submit new online orders'}
+                </span>
+              </div>
+
+              {blacklistError && (
+                <div className="p-3 bg-red-950/60 border border-red-500/50 text-red-200 text-xs">
+                  {blacklistError}
+                </div>
+              )}
+
+              {blockedPhones.length === 0 ? (
+                <p className="text-xs text-[#9E9585] py-2">
+                  {lang === 'ar'
+                    ? 'لا توجد أرقام محظورة حالياً.'
+                    : 'No blocked phone numbers right now.'}
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {blockedPhones.map((item) => {
+                    const isBusy = blockingPhoneBusy === item.phone;
+                    const formattedDate = item.blockedAt
+                      ? (() => {
+                          const d = new Date(item.blockedAt);
+                          if (Number.isNaN(d.getTime())) return null;
+                          return d.toLocaleString(lang === 'ar' ? 'ar-EG' : 'en-US', {
+                            dateStyle: 'short',
+                            timeStyle: 'short',
+                          });
+                        })()
+                      : null;
+
+                    return (
+                      <div
+                        key={item.phone}
+                        className="bg-[#121212] border border-red-500/30 px-3.5 py-2.5 flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-mono text-sm font-bold text-[#F7F3E9]" dir="ltr">
+                            {item.phone}
+                          </div>
+                          {formattedDate && (
+                            <div className="text-[11px] text-[#9E9585] truncate">
+                              {formattedDate}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleUnblockPhone(item.phone)}
+                          className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-800/80 border border-emerald-500/50 text-emerald-300 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <ShieldOff className="w-3.5 h-3.5" />
+                          <span>{isBusy ? '...' : 'فك الحظر'}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
@@ -3871,6 +4102,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>{lang === 'ar' ? 'حذف نهائياً' : 'Delete Permanently'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Phone Blacklist Confirmation Modal */}
+      {confirmBlockTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div className="max-w-md w-full bg-[#1E1E1E] border border-red-500/60 p-6 shadow-2xl space-y-5">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 bg-red-950/70 border border-red-500/60 text-red-400 flex items-center justify-center shrink-0">
+                <Ban className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-bold text-base sm:text-lg text-[#F7F3E9]">
+                  تأكيد حظر رقم الهاتف
+                </h3>
+                <p className="text-xs sm:text-sm text-[#C9C1B1] leading-relaxed">
+                  هل تريد حظر الرقم{' '}
+                  <span className="font-mono font-bold text-[#F7F3E9]" dir="ltr">
+                    {confirmBlockTarget.phone}
+                  </span>
+                  {confirmBlockTarget.customerName ? ` (${confirmBlockTarget.customerName})` : ''}{' '}
+                  ومنع إتمام الطلبات الجديدة به؟ يمكنك فك الحظر في أي وقت من قائمة الأرقام المحظورة.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#D4AF37]/20">
+              <button
+                type="button"
+                onClick={() => setConfirmBlockTarget(null)}
+                disabled={blockingPhoneBusy === confirmBlockTarget.phone}
+                className="px-4 py-2.5 bg-[#121212] border border-[#D4AF37]/30 hover:border-[#D4AF37] text-[#C9C1B1] hover:text-[#F7F3E9] text-xs font-bold cursor-pointer transition-colors"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={blockingPhoneBusy === confirmBlockTarget.phone}
+                onClick={() => handleConfirmBlockPhone(confirmBlockTarget.phone)}
+                className="px-4 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Ban className="w-3.5 h-3.5" />
+                <span>
+                  {blockingPhoneBusy === confirmBlockTarget.phone ? 'جاري الحظر...' : 'تأكيد الحظر'}
+                </span>
               </button>
             </div>
           </div>

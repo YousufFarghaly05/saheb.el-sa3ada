@@ -8,6 +8,11 @@ import {
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import type { CustomerUser, AuthSession } from '../types.ts';
 import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
+import {
+  EGYPTIAN_PHONE_ERROR_AR,
+  isValidEgyptianPhone,
+  normalizeEgyptianPhoneInput,
+} from '../utils/egyptianPhone.ts';
 
 const CUSTOMER_STORAGE_KEY = 'saheb_elsaada_customer_session_v2';
 const GUEST_FAVORITES_KEY = 'saheb_elsaada_guest_favorites_v1';
@@ -15,14 +20,6 @@ const CUSTOMER_EMAIL_DOMAIN = 'customers.saheb-elsaada.com';
 
 const NON_ADMIN_ERROR_AR = 'عذراً، هذا الحساب لا يملك صلاحيات الإدارة';
 const INVALID_ADMIN_CREDENTIALS_ERROR_AR = 'البريد الإلكتروني أو كلمة المرور غير صحيحة';
-
-function normalizePhoneDigits(raw: string): string {
-  // Convert Arabic-Indic (٠-٩) and Extended Arabic-Indic (۰-۹) digits to Western digits
-  const western = raw
-    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
-  return western.replace(/\D/g, '');
-}
 
 function phoneToSyntheticEmail(cleanPhone: string): string {
   return `${cleanPhone}@${CUSTOMER_EMAIL_DOMAIN}`;
@@ -227,9 +224,9 @@ export function useAuth() {
     setAuthLoading(true);
     setAuthError(null);
 
-    const cleanPhone = normalizePhoneDigits(identifier);
-    if (cleanPhone.length < 6) {
-      setAuthError('يرجى إدخال رقم هاتف صحيح');
+    const cleanPhone = normalizeEgyptianPhoneInput(identifier);
+    if (!isValidEgyptianPhone(cleanPhone)) {
+      setAuthError(EGYPTIAN_PHONE_ERROR_AR);
       setAuthLoading(false);
       return false;
     }
@@ -288,7 +285,7 @@ export function useAuth() {
       setAuthError(null);
 
       const trimmedName = payload.name.trim();
-      const cleanPhone = normalizePhoneDigits(payload.phone);
+      const cleanPhone = normalizeEgyptianPhoneInput(payload.phone);
       const trimmedAddress = payload.address.trim();
 
       if (!trimmedName) {
@@ -297,8 +294,8 @@ export function useAuth() {
         return false;
       }
 
-      if (cleanPhone.length < 6) {
-        setAuthError('يرجى إدخال رقم هاتف صحيح');
+      if (!isValidEgyptianPhone(cleanPhone)) {
+        setAuthError(EGYPTIAN_PHONE_ERROR_AR);
         setAuthLoading(false);
         return false;
       }
@@ -367,8 +364,14 @@ export function useAuth() {
 
       const uid = auth.currentUser?.uid || payload.id;
       const trimmedName = payload.name.trim();
-      const cleanPhone = normalizePhoneDigits(payload.phone) || payload.phone.trim();
+      const cleanPhone = normalizeEgyptianPhoneInput(payload.phone);
       const trimmedAddress = payload.address.trim();
+
+      if (!isValidEgyptianPhone(cleanPhone)) {
+        setAuthError(EGYPTIAN_PHONE_ERROR_AR);
+        setAuthLoading(false);
+        return false;
+      }
 
       try {
         const nextFavorites = payload.favoriteMenuIds ?? customer?.favoriteMenuIds ?? [];
