@@ -70,7 +70,11 @@ import { getTranslations } from '../i18n/translations.ts';
 import { PRESET_IMAGE_OPTIONS } from '../data/mediaAssets.ts';
 import { ResilientImage } from './ResilientImage.tsx';
 import { BranchAnalyticsPanel } from './BranchAnalyticsPanel.tsx';
-import { playOrderNotificationChime, unlockAudioContext } from '../utils/orderAlertSound.ts';
+import {
+  playOrderCancelledAlertSound,
+  playOrderNotificationChime,
+  unlockAudioContext,
+} from '../utils/orderAlertSound.ts';
 import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
 
 interface AdminDashboardProps {
@@ -273,8 +277,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [incomingOrderAlerts, setIncomingOrderAlerts] = useState<
     Array<{ branchId: BranchId; order: OnlineOrder }>
   >([]);
+  const [liveCancelledAlerts, setLiveCancelledAlerts] = useState<
+    Array<{ branchId: BranchId; order: OnlineOrder }>
+  >([]);
   const [csvExported, setCsvExported] = useState(false);
   const seenOrderIdsRef = useRef<Set<string> | null>(null);
+  const prevOrderStatusMapRef = useRef<Map<string, string> | null>(null);
+  const adminSelfCancelledKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     try {
@@ -287,6 +296,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     if (!adminSession || !firestoreOrdersReady) {
       seenOrderIdsRef.current = null;
+      prevOrderStatusMapRef.current = null;
       return;
     }
 
@@ -297,20 +307,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
     });
 
-    if (seenOrderIdsRef.current === null) {
-      seenOrderIdsRef.current = new Set(allOrders.map((entry) => entry.order.id));
+    const isCancelledStatus = (st: string | undefined) => st === 'cancelled' || st === 'ملغي';
+
+    // First snapshot after login: seed refs silently so historical orders/cancellations never chime
+    if (seenOrderIdsRef.current === null || prevOrderStatusMapRef.current === null) {
+      seenOrderIdsRef.current = new Set(
+        allOrders.map((entry) => entry.order.firestoreDocId || entry.order.id)
+      );
+      const initialStatusMap = new Map<string, string>();
+      allOrders.forEach((entry) => {
+        const key = entry.order.firestoreDocId || entry.order.id;
+        initialStatusMap.set(key, entry.order.status);
+      });
+      prevOrderStatusMapRef.current = initialStatusMap;
       return;
     }
 
-    const newlyArrived = allOrders.filter(
-      (entry) => !seenOrderIdsRef.current!.has(entry.order.id)
-    );
+    const newlyArrived = allOrders.filter((entry) => {
+      const key = entry.order.firestoreDocId || entry.order.id;
+      return !seenOrderIdsRef.current!.has(key);
+    });
+
+    const newlyCancelled = allOrders.filter((entry) => {
+      const key = entry.order.firestoreDocId || entry.order.id;
+      const prevStatus = prevOrderStatusMapRef.current!.get(key);
+      const currentStatus = entry.order.status;
+      if (prevStatus === undefined) return false;
+      if (isCancelledStatus(prevStatus) || !isCancelledStatus(currentStatus)) return false;
+      if (entry.order.cancelledBy === 'admin') return false;
+      if (adminSelfCancelledKeysRef.current.has(key)) {
+        adminSelfCancelledKeysRef.current.delete(key);
+        return false;
+      }
+      return true;
+    });
+
+    // Keep tracking maps synchronized with latest snapshot
+    allOrders.forEach((entry) => {
+      const key = entry.order.firestoreDocId || entry.order.id;
+      seenOrderIdsRef.current!.add(key);
+      prevOrderStatusMapRef.current!.set(key, entry.order.status);
+    });
 
     if (newlyArrived.length > 0) {
-      newlyArrived.forEach((entry) => seenOrderIdsRef.current!.add(entry.order.id));
       setIncomingOrderAlerts((prev) => [...newlyArrived, ...prev].slice(0, 6));
       if (orderSoundEnabled) {
         playOrderNotificationChime();
+      }
+    }
+
+    if (newlyCancelled.length > 0) {
+      setLiveCancelledAlerts((prev) => {
+        const existingKeys = new Set(prev.map((item) => item.order.firestoreDocId || item.order.id));
+        const uniqueNew = newlyCancelled.filter(
+          (entry) => !existingKeys.has(entry.order.firestoreDocId || entry.order.id)
+        );
+        return [...uniqueNew, ...prev].slice(0, 8);
+      });
+      if (orderSoundEnabled) {
+        playOrderCancelledAlertSound();
       }
     }
   }, [stores, adminSession, firestoreOrdersReady, orderSoundEnabled]);
@@ -1348,8 +1403,121 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         )}
 
-        {/* CUSTOMER ORDER CANCELLATION MANAGEMENT ALERTS */}
-        {unacknowledgedCancellations.length > 0 && (
+        {/* REAL-TIME CUSTOMER CANCELLATION RED ALERT BANNER / TOAST */}
+        {liveCancelledAlerts.length > 0 && (
+          <div
+            role="alert"
+            className="bg-red-950/85 border-2 border-red-500 p-4 sm:p-5 mb-6 space-y-3 shadow-2xl"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-500/40 pb-2.5">
+              <div className="flex items-center gap-2.5 text-red-100">
+                <span className="p-2 bg-red-600 text-white shrink-0 animate-pulse">
+                  <AlertTriangle className="w-4 h-4" />
+                </span>
+                <div>
+                  <h2 className="text-sm sm:text-base font-bold text-white">
+                    {liveCancelledAlerts.length === 1
+                      ? `تنبيه: قام العميل بإلغاء الطلب رقم ${liveCancelledAlerts[0].order.id}`
+                      : `تنبيه: قام العملاء بإلغاء ${liveCancelledAlerts.length} طلبات`}
+                  </h2>
+                  <p className="text-xs text-red-200/90">
+                    {lang === 'ar'
+                      ? 'تم تشغيل نغمة التحذير الفورية لإلغاء الطلب'
+                      : 'Real-time order cancellation warning alert triggered'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  liveCancelledAlerts.forEach(({ branchId, order }) => {
+                    onAcknowledgeOrderCancellation?.(branchId, order.id);
+                  });
+                  setLiveCancelledAlerts([]);
+                }}
+                className="px-3 py-1.5 bg-[#121212] border border-red-400/50 text-xs font-bold text-red-200 hover:bg-red-600 hover:text-white cursor-pointer inline-flex items-center gap-1.5 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>{lang === 'ar' ? 'إغلاق الكل' : 'Dismiss All'}</span>
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {liveCancelledAlerts.map(({ branchId, order }) => {
+                const cfg = branchConfigs[branchId] || branchConfig;
+                const branchTitle = lang === 'ar' ? cfg.shortNameAr : cfg.shortNameEn;
+                return (
+                  <div
+                    key={`live-cancel-${order.firestoreDocId || order.id}`}
+                    className="bg-[#121212]/90 border border-red-500/60 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  >
+                    <div className="space-y-1 text-xs">
+                      <p className="font-bold text-red-200 text-sm">
+                        تنبيه: قام العميل بإلغاء الطلب رقم {order.id}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2 py-0.5 bg-red-600 text-white font-bold text-[11px]">
+                          ملغي من العميل
+                        </span>
+                        <span className="px-2 py-0.5 bg-[#1E1E1E] border border-[#D4AF37]/40 text-[#D4AF37] font-bold text-[11px]">
+                          {branchTitle}
+                        </span>
+                        <span className="font-bold text-[#F7F3E9]">{order.customerName}</span>
+                        <span dir="ltr" className="font-mono text-[#C9C1B1]">
+                          {order.phone}
+                        </span>
+                        <span className="font-bold text-[#D4AF37]">
+                          {order.totalAmount} {lang === 'ar' ? 'ج.م' : 'EGP'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (branchId !== adminBranch) {
+                            handleSelectAdminBranch(branchId);
+                          }
+                          setActiveTab('bookings');
+                          onAcknowledgeOrderCancellation?.(branchId, order.id);
+                          setLiveCancelledAlerts((prev) =>
+                            prev.filter((item) => item.order.id !== order.id)
+                          );
+                        }}
+                        className="px-3 py-1.5 bg-[#1E1E1E] hover:bg-[#D4AF37] hover:text-[#121212] border border-[#D4AF37]/50 text-[#D4AF37] text-xs font-bold cursor-pointer transition-colors"
+                      >
+                        {t.bookings.goToOrderBtn}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onAcknowledgeOrderCancellation?.(branchId, order.id);
+                          setLiveCancelledAlerts((prev) =>
+                            prev.filter((item) => item.order.id !== order.id)
+                          );
+                        }}
+                        aria-label={lang === 'ar' ? 'إغلاق التنبيه' : 'Dismiss alert'}
+                        className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        <span>{lang === 'ar' ? 'إغلاق' : 'Dismiss'}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* CUSTOMER ORDER CANCELLATION MANAGEMENT ALERTS (Unacknowledged historical cancellations) */}
+        {unacknowledgedCancellations.filter(
+          ({ order }) =>
+            !liveCancelledAlerts.some(
+              (live) => (live.order.firestoreDocId || live.order.id) === (order.firestoreDocId || order.id)
+            )
+        ).length > 0 && (
           <div
             role="alert"
             className="bg-red-950/50 border-2 border-red-500 p-4 sm:p-5 mb-6 space-y-3 shadow-xl"
@@ -1361,7 +1529,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
                 <div>
                   <h2 className="text-sm sm:text-base font-bold text-red-100">
-                    {t.bookings.customerCancelAlertTitle} ({unacknowledgedCancellations.length})
+                    {t.bookings.customerCancelAlertTitle} (
+                    {
+                      unacknowledgedCancellations.filter(
+                        ({ order }) =>
+                          !liveCancelledAlerts.some(
+                            (live) =>
+                              (live.order.firestoreDocId || live.order.id) ===
+                              (order.firestoreDocId || order.id)
+                          )
+                      ).length
+                    }
+                    )
                   </h2>
                   <p className="text-xs text-red-200/80">
                     {t.bookings.customerCancelAlertDesc}
@@ -1371,12 +1550,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <div className="space-y-2">
-              {unacknowledgedCancellations.map(({ branchId, branchName, order }) => (
+              {unacknowledgedCancellations
+                .filter(
+                  ({ order }) =>
+                    !liveCancelledAlerts.some(
+                      (live) =>
+                        (live.order.firestoreDocId || live.order.id) ===
+                        (order.firestoreDocId || order.id)
+                    )
+                )
+                .map(({ branchId, branchName, order }) => (
                 <div
                   key={`cancel-alert-${order.id}`}
                   className="bg-[#121212]/90 border border-red-500/45 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
                   <div className="space-y-1 text-xs">
+                    <p className="font-bold text-red-200">
+                      تنبيه: قام العميل بإلغاء الطلب رقم {order.id}
+                    </p>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="px-2 py-0.5 bg-red-600 text-white font-mono font-bold text-[11px]">
                         #{order.id}
@@ -2745,17 +2936,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     });
                   })();
                   const isCustomerCancelled =
-                    o.status === 'cancelled' && o.cancelledBy === 'customer';
+                    o.status === 'cancelled' && o.cancelledBy !== 'admin';
                   const isUnreadCancel =
                     isCustomerCancelled && !o.adminCancelAcknowledged;
                   return (
                   <div
                     key={`${orderBranchId}-${o.id}`}
-                    className={`border p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 ${
+                    className={`border p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors ${
                       isUnreadCancel
-                        ? 'bg-red-950/30 border-2 border-red-500 shadow-lg'
+                        ? 'bg-red-950/40 border-2 border-red-500 shadow-lg'
                         : isCustomerCancelled
-                          ? 'bg-[#1E1E1E] border border-red-500/45'
+                          ? 'bg-red-950/20 border-2 border-red-500/75'
                           : 'bg-[#1E1E1E] border border-[#D4AF37]/30'
                     }`}
                   >
@@ -2803,9 +2994,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </span>
 
                         {isCustomerCancelled && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-xs font-bold bg-red-600/20 border border-red-500 text-red-200">
-                            <XCircle className="w-3.5 h-3.5 text-red-400" />
-                            <span>{t.bookings.cancelledByCustomerBadge}</span>
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 text-xs font-bold bg-red-600 border border-red-400 text-white shadow-sm">
+                            <XCircle className="w-3.5 h-3.5 text-white" />
+                            <span>ملغي من العميل</span>
                           </span>
                         )}
                       </div>
@@ -2862,7 +3053,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <button
                             key={st}
                             type="button"
-                            onClick={() => onUpdateOrderStatus(o.id, st, orderBranchId)}
+                            onClick={() => {
+                              if (st === 'cancelled') {
+                                adminSelfCancelledKeysRef.current.add(o.firestoreDocId || o.id);
+                              }
+                              onUpdateOrderStatus(o.id, st, orderBranchId);
+                            }}
                             className={`px-3 py-1.5 text-xs font-bold border transition-colors cursor-pointer flex items-center gap-1 ${
                               active
                                 ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'

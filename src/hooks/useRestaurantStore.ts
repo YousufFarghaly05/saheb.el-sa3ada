@@ -38,6 +38,43 @@ const VALID_BRANCH_IDS: BranchId[] = ['branch_tagamoa', 'branch_moez', 'branch_z
 
 const STORE_BROADCAST_CHANNEL = 'saheb_elsaada_store_sync_v1';
 export const ORDER_CANCEL_WINDOW_MS = 15 * 60 * 1000;
+const RECENT_ORDER_DOCS_KEY = 'saheb_elsaada_recent_order_docs_v1';
+
+interface RecentOrderDocRecord {
+  firestoreDocId: string;
+  branchId: BranchId;
+  createdAt: string;
+}
+
+function readRecentOrderDocMap(): Record<string, RecentOrderDocRecord> {
+  try {
+    const raw = localStorage.getItem(RECENT_ORDER_DOCS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, RecentOrderDocRecord>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveRecentOrderDocRecord(orderCode: string, record: RecentOrderDocRecord) {
+  try {
+    const existing = readRecentOrderDocMap();
+    const now = Date.now();
+    // Prune entries older than 24 hours to keep localStorage lean
+    const pruned: Record<string, RecentOrderDocRecord> = {};
+    Object.entries(existing).forEach(([key, val]) => {
+      const ts = new Date(val?.createdAt || 0).getTime();
+      if (!Number.isNaN(ts) && now - ts < 24 * 60 * 60 * 1000) {
+        pruned[key] = val;
+      }
+    });
+    pruned[orderCode] = record;
+    localStorage.setItem(RECENT_ORDER_DOCS_KEY, JSON.stringify(pruned));
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function isBranchId(value: unknown): value is BranchId {
   return value === 'branch_tagamoa' || value === 'branch_moez' || value === 'branch_zayed';
@@ -291,21 +328,47 @@ function parseFirestoreOrder(docId: string, raw: Record<string, unknown>): Onlin
       quantity: Math.max(1, Number(it.quantity) || 1),
     }));
 
-  const statusVal = String(raw.status || 'pending');
+  const statusVal = String(raw.status || 'pending').trim();
   const status: BookingStatus =
-    statusVal === 'pending' ||
-    statusVal === 'preparing' ||
-    statusVal === 'confirmed' ||
-    statusVal === 'completed' ||
-    statusVal === 'cancelled'
+    statusVal === 'ملغي'
+      ? 'cancelled'
+      : statusVal === 'pending' ||
+        statusVal === 'preparing' ||
+        statusVal === 'confirmed' ||
+        statusVal === 'completed' ||
+        statusVal === 'cancelled'
       ? statusVal
       : 'pending';
+
+  let cancelledAtStr: string | undefined;
+  if (typeof raw.cancelledAt === 'string' && raw.cancelledAt.trim()) {
+    cancelledAtStr = raw.cancelledAt;
+  } else if (
+    raw.cancelledAt &&
+    typeof raw.cancelledAt === 'object' &&
+    'toDate' in raw.cancelledAt &&
+    typeof (raw.cancelledAt as { toDate?: () => Date }).toDate === 'function'
+  ) {
+    cancelledAtStr = (raw.cancelledAt as { toDate: () => Date }).toDate().toISOString();
+  }
+
+  const cancelledBy: 'customer' | 'admin' | undefined =
+    raw.cancelledBy === 'admin'
+      ? 'admin'
+      : raw.cancelledBy === 'customer' || status === 'cancelled'
+      ? 'customer'
+      : undefined;
 
   return {
     id: typeof raw.orderCode === 'string' && raw.orderCode.trim() ? raw.orderCode : docId,
     firestoreDocId: docId,
     branchId,
-    customerId: typeof raw.customerId === 'string' ? raw.customerId : undefined,
+    customerId:
+      typeof raw.customerId === 'string'
+        ? raw.customerId
+        : typeof raw.userId === 'string'
+        ? raw.userId
+        : undefined,
     customerName,
     phone,
     serviceType: raw.serviceType === 'takeaway' ? 'takeaway' : 'delivery',
@@ -325,9 +388,8 @@ function parseFirestoreOrder(docId: string, raw: Record<string, unknown>): Onlin
     rating: typeof raw.rating === 'number' ? raw.rating : undefined,
     ratingComment: typeof raw.ratingComment === 'string' ? raw.ratingComment : undefined,
     ratedAt: typeof raw.ratedAt === 'string' ? raw.ratedAt : undefined,
-    cancelledBy:
-      raw.cancelledBy === 'customer' || raw.cancelledBy === 'admin' ? raw.cancelledBy : undefined,
-    cancelledAt: typeof raw.cancelledAt === 'string' ? raw.cancelledAt : undefined,
+    cancelledBy,
+    cancelledAt: cancelledAtStr,
     cancellationReason:
       typeof raw.cancellationReason === 'string' ? raw.cancellationReason : undefined,
     adminCancelAcknowledged:
@@ -384,6 +446,7 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
 
   const [firestoreOrdersReady, setFirestoreOrdersReady] = useState(false);
   const channelRef = useRef<BroadcastChannel | null>(null);
+  const pendingOrderWritesRef = useRef<Map<string, Promise<string | null>>>(new Map());
 
   // Sync across tabs in the same browser
   useEffect(() => {
@@ -933,11 +996,13 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
         orders: [created, ...prev.orders],
       }));
 
-      // Save order to Cloud Firestore `orders` collection via addDoc
+      // Save order to Cloud Firestore `orders` collection via addDoc (including userId)
+      const currentUid = auth.currentUser?.uid || null;
       const firestorePayload = stripUndefinedDeep({
         orderCode,
         branchId,
-        customerId: entry.customerId || null,
+        userId: currentUid,
+        customerId: entry.customerId || currentUid || null,
         customerName: entry.customerName,
         phone: entry.phone,
         serviceType: entry.serviceType,
@@ -954,18 +1019,30 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
         createdAtServer: serverTimestamp(),
       });
 
-      void addDoc(collection(db, 'orders'), firestorePayload)
+      const writePromise = addDoc(collection(db, 'orders'), firestorePayload)
         .then((docRef) => {
+          saveRecentOrderDocRecord(orderCode, {
+            firestoreDocId: docRef.id,
+            branchId,
+            createdAt,
+          });
           persistBranch(branchId, (prev) => ({
             ...prev,
             orders: prev.orders.map((o) =>
               o.id === orderCode ? { ...o, firestoreDocId: docRef.id } : o
             ),
           }));
+          return docRef.id;
         })
         .catch((error) => {
           logFirestoreError(error, OperationType.CREATE, 'orders');
+          return null;
+        })
+        .finally(() => {
+          pendingOrderWritesRef.current.delete(orderCode);
         });
+
+      pendingOrderWritesRef.current.set(orderCode, writePromise);
 
       return created;
     },
@@ -1019,31 +1096,85 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
   );
 
   const cancelOrderByCustomer = useCallback(
-    (
+    async (
       branchId: BranchId,
       id: string,
       reason?: string
-    ): { ok: boolean; reason?: 'not_found' | 'already_final' | 'expired' } => {
-      const target = stores[branchId].orders.find((o) => o.id === id);
+    ): Promise<{
+      ok: boolean;
+      reason?: 'not_found' | 'already_final' | 'expired' | 'firestore_error';
+      error?: string;
+    }> => {
+      const target = stores[branchId].orders.find((o) => o.id === id || o.firestoreDocId === id);
       if (!target) {
-        return { ok: false, reason: 'not_found' };
+        return {
+          ok: false,
+          reason: 'not_found',
+          error: 'تعذر العثور على هذا الطلب.',
+        };
       }
       if (target.status === 'cancelled' || target.status === 'completed') {
-        return { ok: false, reason: 'already_final' };
+        return {
+          ok: false,
+          reason: 'already_final',
+          error: 'لا يمكن إلغاء هذا الطلب لأنه مكتمل أو ملغي بالفعل.',
+        };
       }
       const elapsedMs = Date.now() - new Date(target.createdAt).getTime();
       if (Number.isNaN(elapsedMs) || elapsedMs > ORDER_CANCEL_WINDOW_MS) {
-        return { ok: false, reason: 'expired' };
+        return {
+          ok: false,
+          reason: 'expired',
+          error: 'عذراً، انتهت مهلة الـ ١٥ دقيقة المسموح بها لإلغاء الطلب.',
+        };
       }
 
+      // Resolve the real Firestore Document ID (state -> localStorage map -> in-flight addDoc)
+      let firestoreOrderId: string | undefined =
+        target.firestoreDocId || readRecentOrderDocMap()[target.id]?.firestoreDocId;
+
+      if (!firestoreOrderId) {
+        const inFlight = pendingOrderWritesRef.current.get(target.id);
+        if (inFlight) {
+          firestoreOrderId = (await inFlight) ?? undefined;
+        }
+      }
+
+      if (!firestoreOrderId) {
+        return {
+          ok: false,
+          reason: 'firestore_error',
+          error:
+            'تعذر ربط هذا الطلب بقاعدة البيانات لإلغائه. يرجى التواصل مع إدارة المطعم مباشرة.',
+        };
+      }
+
+      // Strictly update ONLY status and cancelledAt to match Firestore security rules
+      try {
+        await updateDoc(doc(db, 'orders', firestoreOrderId), {
+          status: 'cancelled',
+          cancelledAt: serverTimestamp(),
+        });
+      } catch (error) {
+        logFirestoreError(error, OperationType.UPDATE, `orders/${firestoreOrderId}`);
+        const detail = error instanceof Error && error.message ? ` (${error.message})` : '';
+        return {
+          ok: false,
+          reason: 'firestore_error',
+          error: `تعذر إلغاء الطلب وإخطار الإدارة حالياً. يرجى المحاولة مرة أخرى${detail}`,
+        };
+      }
+
+      // Only update local UI state AFTER Firestore updateDoc succeeds
       const cancelledAt = new Date().toISOString();
       const trimmedReason = reason?.trim();
       persistBranch(branchId, (prev) => ({
         ...prev,
         orders: prev.orders.map((o) =>
-          o.id === id
+          o.id === target.id || o.firestoreDocId === firestoreOrderId
             ? {
                 ...o,
+                firestoreDocId: firestoreOrderId,
                 status: 'cancelled',
                 cancelledBy: 'customer',
                 cancelledAt,
@@ -1053,6 +1184,7 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
             : o
         ),
       }));
+
       return { ok: true };
     },
     [persistBranch, stores]

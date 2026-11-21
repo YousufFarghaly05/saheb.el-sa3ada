@@ -92,3 +92,75 @@ export function playOrderNotificationChime(): boolean {
     return false;
   }
 }
+
+function scheduleCancellationAlert(ctx: AudioContext): void {
+  const now = ctx.currentTime + 0.01;
+  // Distinct descending warning double-tone (520Hz -> 310Hz), played twice with a 150ms gap
+  const toneDuration = 0.24;
+  const gapDuration = 0.15;
+  const pulses = [0, toneDuration + gapDuration];
+
+  const masterGain = ctx.createGain();
+  masterGain.gain.setValueAtTime(0.85, now);
+  masterGain.connect(ctx.destination);
+
+  pulses.forEach((offset) => {
+    const startTime = now + offset;
+    const endTime = startTime + toneDuration;
+
+    const triOsc = ctx.createOscillator();
+    const sawOsc = ctx.createOscillator();
+    const sawGain = ctx.createGain();
+    const env = ctx.createGain();
+
+    triOsc.type = 'triangle';
+    triOsc.frequency.setValueAtTime(520, startTime);
+    triOsc.frequency.exponentialRampToValueAtTime(310, endTime - 0.02);
+
+    sawOsc.type = 'sawtooth';
+    sawOsc.frequency.setValueAtTime(520, startTime);
+    sawOsc.frequency.exponentialRampToValueAtTime(310, endTime - 0.02);
+
+    // Keep sawtooth subtle beneath the triangle wave for an unmistakable warning buzzer timbre
+    sawGain.gain.setValueAtTime(0.22, startTime);
+
+    env.gain.setValueAtTime(0.0001, startTime);
+    env.gain.linearRampToValueAtTime(0.28, startTime + 0.015);
+    env.gain.setValueAtTime(0.24, endTime - 0.05);
+    env.gain.exponentialRampToValueAtTime(0.0008, endTime);
+
+    triOsc.connect(env);
+    sawOsc.connect(sawGain);
+    sawGain.connect(env);
+    env.connect(masterGain);
+
+    triOsc.start(startTime);
+    sawOsc.start(startTime);
+    triOsc.stop(endTime + 0.02);
+    sawOsc.stop(endTime + 0.02);
+  });
+}
+
+/**
+ * Plays a distinct descending warning double-tone (520Hz -> 310Hz x2 with 150ms gap)
+ * when a customer cancels an order, clearly distinguishable from the ascending new-order chime.
+ */
+export function playOrderCancelledAlertSound(): boolean {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return false;
+
+    if (ctx.state === 'suspended') {
+      ctx
+        .resume()
+        .then(() => scheduleCancellationAlert(ctx))
+        .catch(() => {});
+    } else {
+      scheduleCancellationAlert(ctx);
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}

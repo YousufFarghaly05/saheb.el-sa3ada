@@ -41,7 +41,22 @@ service cloud.firestore {
         && request.resource.data.totalAmount >= 0
         && request.resource.data.status == 'pending';
 
-      allow read, update, delete: if isAdmin();
+      allow read, delete: if isAdmin();
+
+      // Admin can perform any status update; customers can strictly cancel a non-final order
+      // by updating ONLY `status` (to 'cancelled') and `cancelledAt`.
+      allow update: if isAdmin()
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancelledAt'])
+          && request.resource.data.status == 'cancelled'
+          && resource.data.status != 'cancelled'
+          && resource.data.status != 'completed'
+          && (
+            !('userId' in resource.data)
+            || resource.data.userId == null
+            || (request.auth != null && request.auth.uid == resource.data.userId)
+          )
+        );
     }
 
     // Branch Menus: Public read for all customers; Admin-only write.

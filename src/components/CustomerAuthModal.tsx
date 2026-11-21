@@ -53,7 +53,11 @@ interface CustomerAuthModalProps {
   onCancelOrder: (
     orderId: string,
     reason?: string
-  ) => { ok: boolean; reason?: 'not_found' | 'already_final' | 'expired' };
+  ) => Promise<{
+    ok: boolean;
+    reason?: 'not_found' | 'already_final' | 'expired' | 'firestore_error';
+    error?: string;
+  }>;
   onOpenCheckout: () => void;
   authError: string | null;
   authLoading: boolean;
@@ -202,6 +206,8 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState<string>('');
+  const [isSubmittingCancel, setIsSubmittingCancel] = useState<boolean>(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   // Login form state
   const [identifier, setIdentifier] = useState('');
@@ -970,6 +976,7 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                                     onClick={() => {
                                       setCancellingOrderId(o.id);
                                       setCancelReason('');
+                                      setCancelError(null);
                                       setRatingOrderId(null);
                                     }}
                                     className="px-3 py-2 bg-red-950/50 hover:bg-red-900/70 border border-red-500/50 text-red-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
@@ -1012,28 +1019,55 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                             {/* Inline 15-Minute Order Cancellation Confirmation */}
                             {cancellingOrderId === o.id && (
                               <form
-                                onSubmit={(e) => {
+                                onSubmit={async (e) => {
                                   e.preventDefault();
+                                  if (isSubmittingCancel) return;
+                                  setCancelError(null);
+                                  setIsSubmittingCancel(true);
                                   selfCancelledIdsRef.current.add(o.id);
-                                  const result = onCancelOrder(o.id, cancelReason);
-                                  if (result.ok) {
-                                    pushToast({
-                                      orderId: o.id,
-                                      newStatus: 'cancelled',
-                                      customMessage: t.cancelSuccessToast,
-                                      variant: 'cancel_success',
-                                    });
-                                    setCancellingOrderId(null);
-                                    setCancelReason('');
-                                  } else {
+                                  try {
+                                    const result = await onCancelOrder(o.id, cancelReason);
+                                    if (result.ok) {
+                                      pushToast({
+                                        orderId: o.id,
+                                        newStatus: 'cancelled',
+                                        customMessage: 'تم الإلغاء وإخطار إدارة المطعم',
+                                        variant: 'cancel_success',
+                                      });
+                                      setCancellingOrderId(null);
+                                      setCancelReason('');
+                                      setCancelError(null);
+                                    } else {
+                                      selfCancelledIdsRef.current.delete(o.id);
+                                      const errMessage =
+                                        result.error ||
+                                        (result.reason === 'expired'
+                                          ? t.cancelExpiredError
+                                          : 'تعذر إلغاء الطلب حالياً، يرجى المحاولة مرة أخرى.');
+                                      setCancelError(errMessage);
+                                      pushToast({
+                                        orderId: o.id,
+                                        newStatus: o.status,
+                                        customMessage: errMessage,
+                                        variant: 'error',
+                                      });
+                                      if (result.reason === 'expired' || result.reason === 'already_final') {
+                                        setCancellingOrderId(null);
+                                      }
+                                    }
+                                  } catch {
                                     selfCancelledIdsRef.current.delete(o.id);
+                                    const errMessage =
+                                      'تعذر الاتصال بقاعدة البيانات لإلغاء الطلب. يرجى المحاولة مرة أخرى.';
+                                    setCancelError(errMessage);
                                     pushToast({
                                       orderId: o.id,
                                       newStatus: o.status,
-                                      customMessage: t.cancelExpiredError,
+                                      customMessage: errMessage,
                                       variant: 'error',
                                     });
-                                    setCancellingOrderId(null);
+                                  } finally {
+                                    setIsSubmittingCancel(false);
                                   }
                                 }}
                                 className="bg-red-950/30 border border-red-500/45 p-3.5 space-y-3"
@@ -1048,6 +1082,15 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                                   </div>
                                 </div>
 
+                                {cancelError && (
+                                  <div
+                                    role="alert"
+                                    className="p-2.5 bg-red-950/80 border border-red-500 text-red-200 text-[11px] font-bold"
+                                  >
+                                    {cancelError}
+                                  </div>
+                                )}
+
                                 <div>
                                   <label className="block text-[11px] text-[#C9C1B1] mb-1">
                                     {t.cancelReasonLabel}
@@ -1055,29 +1098,37 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                                   <input
                                     type="text"
                                     maxLength={180}
+                                    disabled={isSubmittingCancel}
                                     value={cancelReason}
                                     onChange={(e) => setCancelReason(e.target.value)}
                                     placeholder={t.cancelReasonPlaceholder}
-                                    className="w-full px-3 py-2 bg-[#121212] border border-red-500/35 focus:border-red-400 focus:outline-none text-[#F7F3E9] text-xs"
+                                    className="w-full px-3 py-2 bg-[#121212] border border-red-500/35 focus:border-red-400 focus:outline-none text-[#F7F3E9] text-xs disabled:opacity-60"
                                   />
                                 </div>
 
                                 <div className="flex items-center justify-end gap-2">
                                   <button
                                     type="button"
+                                    disabled={isSubmittingCancel}
                                     onClick={() => {
                                       setCancellingOrderId(null);
                                       setCancelReason('');
+                                      setCancelError(null);
                                     }}
-                                    className="px-3 py-1.5 bg-[#121212] border border-[#D4AF37]/30 text-[#C9C1B1] hover:text-[#F7F3E9] text-xs font-semibold cursor-pointer"
+                                    className="px-3 py-1.5 bg-[#121212] border border-[#D4AF37]/30 text-[#C9C1B1] hover:text-[#F7F3E9] text-xs font-semibold cursor-pointer disabled:opacity-50"
                                   >
                                     {t.keepOrderBtn}
                                   </button>
                                   <button
                                     type="submit"
-                                    className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold cursor-pointer"
+                                    disabled={isSubmittingCancel}
+                                    className="px-4 py-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-60 text-white text-xs font-bold cursor-pointer"
                                   >
-                                    {t.confirmCancelBtn}
+                                    {isSubmittingCancel
+                                      ? lang === 'ar'
+                                        ? 'جاري الإلغاء...'
+                                        : 'Cancelling...'
+                                      : t.confirmCancelBtn}
                                   </button>
                                 </div>
                               </form>
