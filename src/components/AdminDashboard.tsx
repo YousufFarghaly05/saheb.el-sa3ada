@@ -41,6 +41,7 @@ import {
   Calendar,
   Ban,
   ShieldOff,
+  Loader2,
 } from 'lucide-react';
 import {
   collection,
@@ -85,7 +86,10 @@ import {
   unlockAudioContext,
 } from '../utils/orderAlertSound.ts';
 import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
-import { printThermalReceipt } from '../utils/printThermalReceipt.ts';
+import {
+  printThermalReceipt,
+  type PrintReceiptStatus,
+} from '../utils/printThermalReceipt.ts';
 import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
 import { normalizeEgyptianPhoneInput } from '../utils/egyptianPhone.ts';
 
@@ -496,6 +500,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [orderDateFrom, setOrderDateFrom] = useState('');
   const [orderDateTo, setOrderDateTo] = useState('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | BookingStatus>('all');
+  const [receiptPrintStates, setReceiptPrintStates] = useState<
+    Record<string, { status: PrintReceiptStatus; error?: string }>
+  >({});
+
+  const handlePrintOrderReceipt = (order: OnlineOrder, branchCfg: BranchConfig) => {
+    const orderKey = order.firestoreDocId || order.id;
+    printThermalReceipt(order, branchCfg, {
+      onStatusChange: (status, errorMessage) => {
+        setReceiptPrintStates((prev) => ({
+          ...prev,
+          [orderKey]: { status, error: errorMessage },
+        }));
+      },
+    });
+  };
   const [editingMenuId, setEditingMenuId] = useState<string | null>(null);
   const [mTitleAr, setMTitleAr] = useState('');
   const [mTitleEn, setMTitleEn] = useState('');
@@ -3166,19 +3185,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         );
                       })}
 
-                      <button
-                        type="button"
-                        onClick={() => printThermalReceipt(o, orderBranchCfg)}
-                        title={
-                          lang === 'ar'
-                            ? 'طباعة الفاتورة لطابعة الكاشير الحرارية'
-                            : 'Print Thermal Receipt'
-                        }
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#121212] hover:bg-[#D4AF37] border border-[#D4AF37]/60 text-[#D4AF37] hover:text-[#121212] text-xs font-bold cursor-pointer transition-colors"
-                      >
-                        <Printer className="w-3.5 h-3.5 shrink-0" />
-                        <span>{lang === 'ar' ? 'طباعة الفاتورة' : 'Print Receipt'}</span>
-                      </button>
+                      {(() => {
+                        const orderPrintKey = o.firestoreDocId || o.id;
+                        const printState = receiptPrintStates[orderPrintKey] || {
+                          status: 'ready' as PrintReceiptStatus,
+                        };
+                        const isPrintingLoading = printState.status === 'loading';
+                        const isPrintError = printState.status === 'error';
+
+                        return (
+                          <div className="inline-flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={isPrintingLoading}
+                              onClick={() => handlePrintOrderReceipt(o, orderBranchCfg)}
+                              title={
+                                lang === 'ar'
+                                  ? 'طباعة الفاتورة لطابعة الكاشير الحرارية'
+                                  : 'Print Thermal Receipt'
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#121212] hover:bg-[#D4AF37] border border-[#D4AF37]/60 text-[#D4AF37] hover:text-[#121212] disabled:opacity-60 disabled:cursor-wait text-xs font-bold cursor-pointer transition-colors"
+                            >
+                              {isPrintingLoading ? (
+                                <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                              ) : (
+                                <Printer className="w-3.5 h-3.5 shrink-0" />
+                              )}
+                              <span>{lang === 'ar' ? 'طباعة الفاتورة' : 'Print Receipt'}</span>
+                            </button>
+
+                            <span
+                              role="status"
+                              aria-live="polite"
+                              className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold border ${
+                                isPrintingLoading
+                                  ? 'bg-[#D4AF37]/10 border-[#D4AF37]/40 text-[#D4AF37]'
+                                  : isPrintError
+                                    ? 'bg-red-950/50 border-red-500/45 text-red-300'
+                                    : 'bg-emerald-950/35 border-emerald-500/35 text-emerald-300'
+                              }`}
+                            >
+                              {isPrintingLoading ? (
+                                <>
+                                  <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                  <span>{lang === 'ar' ? 'جاري التحميل...' : 'Loading...'}</span>
+                                </>
+                              ) : isPrintError ? (
+                                <>
+                                  <AlertTriangle className="w-3 h-3 shrink-0" />
+                                  <span>{lang === 'ar' ? 'فشل الطباعة' : 'Print failed'}</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span
+                                    className="w-1.5 h-1.5 bg-emerald-400 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  <span>{lang === 'ar' ? 'جاهزة للطباعة' : 'Ready to print'}</span>
+                                </>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })()}
 
                       <button
                         type="button"
@@ -3190,6 +3259,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
+
+                    {(() => {
+                      const orderPrintKey = o.firestoreDocId || o.id;
+                      const printState = receiptPrintStates[orderPrintKey];
+                      if (!printState || printState.status !== 'error') return null;
+
+                      return (
+                        <div
+                          role="alert"
+                          className="flex items-start justify-between gap-2 p-2.5 bg-red-950/60 border border-red-500/50 text-red-200 text-xs"
+                        >
+                          <div className="flex items-start gap-2">
+                            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                            <span>
+                              {lang === 'ar'
+                                ? printState.error ||
+                                  'تعذر فتح نافذة الطباعة. يرجى التحقق من إعدادات المتصفح أو الطابعة والمحاولة مرة أخرى.'
+                                : 'Failed to open the print dialog. Please check your browser print permissions or printer connection and try again.'}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setReceiptPrintStates((prev) => ({
+                                ...prev,
+                                [orderPrintKey]: { status: 'ready' },
+                              }))
+                            }
+                            aria-label={lang === 'ar' ? 'إغلاق رسالة الخطأ' : 'Dismiss error'}
+                            className="p-0.5 text-red-300 hover:text-white cursor-pointer shrink-0"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                   );
                 })

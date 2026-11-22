@@ -398,64 +398,105 @@ export function buildThermalReceiptHtml(order: OnlineOrder, branchConfig: Branch
 </html>`;
 }
 
+export type PrintReceiptStatus = 'ready' | 'loading' | 'error';
+
+export interface PrintReceiptCallbacks {
+  onStatusChange?: (status: PrintReceiptStatus, errorMessage?: string) => void;
+}
+
 const RECEIPT_IFRAME_ID = 'saheb-thermal-receipt-print-frame';
 
-export function printThermalReceipt(order: OnlineOrder, branchConfig: BranchConfig): void {
-  // Remove any leftover receipt iframe before creating a fresh one
-  const existing = document.getElementById(RECEIPT_IFRAME_ID);
-  if (existing && existing.parentNode) {
-    existing.parentNode.removeChild(existing);
-  }
+const DEFAULT_PRINT_ERROR_AR =
+  'تعذر فتح نافذة الطباعة. يرجى التأكد من السماح بالنوافذ المنبثقة/الطباعة في المتصفح أو التحقق من اتصال الطابعة ثم المحاولة مرة أخرى.';
 
-  const iframe = document.createElement('iframe');
-  iframe.id = RECEIPT_IFRAME_ID;
-  iframe.setAttribute('aria-hidden', 'true');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  iframe.style.opacity = '0';
-  iframe.style.pointerEvents = 'none';
-  document.body.appendChild(iframe);
+export function printThermalReceipt(
+  order: OnlineOrder,
+  branchConfig: BranchConfig,
+  callbacks?: PrintReceiptCallbacks
+): void {
+  callbacks?.onStatusChange?.('loading');
 
-  const html = buildThermalReceiptHtml(order, branchConfig);
-  const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-  const iframeWin = iframe.contentWindow;
-
-  if (!iframeDoc || !iframeWin) {
-    iframe.remove();
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    callbacks?.onStatusChange?.('error', DEFAULT_PRINT_ERROR_AR);
     return;
   }
 
+  let iframe: HTMLIFrameElement | null = null;
   let cleaned = false;
+
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
     window.setTimeout(() => {
-      if (iframe.parentNode) {
+      if (iframe && iframe.parentNode) {
         iframe.parentNode.removeChild(iframe);
       }
     }, 300);
   };
 
-  iframeDoc.open();
-  iframeDoc.write(html);
-  iframeDoc.close();
-
-  const triggerPrint = () => {
-    try {
-      iframeWin.addEventListener('afterprint', cleanup, { once: true });
-      iframeWin.focus();
-      iframeWin.print();
-    } catch {
-      cleanup();
+  try {
+    // Remove any leftover receipt iframe before creating a fresh one
+    const existing = document.getElementById(RECEIPT_IFRAME_ID);
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
     }
-    // Fallback cleanup in case a browser does not fire afterprint on iframes
-    window.setTimeout(cleanup, 60000);
-  };
 
-  // Give the iframe layout engine a brief tick to settle before opening the print dialog
-  window.setTimeout(triggerPrint, 150);
+    iframe = document.createElement('iframe');
+    iframe.id = RECEIPT_IFRAME_ID;
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    document.body.appendChild(iframe);
+
+    const html = buildThermalReceiptHtml(order, branchConfig);
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+    const iframeWin = iframe.contentWindow;
+
+    if (!iframeDoc || !iframeWin || typeof iframeWin.print !== 'function') {
+      cleanup();
+      callbacks?.onStatusChange?.('error', DEFAULT_PRINT_ERROR_AR);
+      return;
+    }
+
+    iframeDoc.open();
+    iframeDoc.write(html);
+    iframeDoc.close();
+
+    const triggerPrint = () => {
+      try {
+        if (!iframeWin || typeof iframeWin.print !== 'function') {
+          throw new Error('Print API unavailable');
+        }
+        iframeWin.addEventListener(
+          'afterprint',
+          () => {
+            callbacks?.onStatusChange?.('ready');
+            cleanup();
+          },
+          { once: true }
+        );
+        iframeWin.focus();
+        iframeWin.print();
+        callbacks?.onStatusChange?.('ready');
+      } catch {
+        cleanup();
+        callbacks?.onStatusChange?.('error', DEFAULT_PRINT_ERROR_AR);
+        return;
+      }
+      // Fallback cleanup in case a browser does not fire afterprint on iframes
+      window.setTimeout(cleanup, 60000);
+    };
+
+    // Give the iframe layout engine a brief tick to settle before opening the print dialog
+    window.setTimeout(triggerPrint, 180);
+  } catch {
+    cleanup();
+    callbacks?.onStatusChange?.('error', DEFAULT_PRINT_ERROR_AR);
+  }
 }
