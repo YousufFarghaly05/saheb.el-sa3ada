@@ -503,8 +503,8 @@ export function App() {
         customer={customer}
         onUpdateQty={handleUpdateCartQty}
         onClearCart={handleClearCart}
-        onSubmitOrder={(entry) => {
-          const created = addOrder(activeBranch, entry);
+        onSubmitOrder={async (entry) => {
+          const created = await addOrder(activeBranch, entry);
           playOrderNotificationChime();
           return created;
         }}

@@ -7,6 +7,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -34,6 +35,44 @@ const BRANCH_STORAGE_KEYS: Record<BranchId, string> = {
 };
 
 const VALID_BRANCH_IDS: BranchId[] = ['branch_tagamoa', 'branch_moez', 'branch_zayed'];
+
+const BRANCH_ORDER_CODES: Record<BranchId, string> = {
+  branch_tagamoa: 'TAG',
+  branch_moez: 'MOEZ',
+  branch_zayed: 'ZAYED',
+};
+
+async function generateSequentialOrderCode(branchId: BranchId): Promise<string> {
+  const branchCode = BRANCH_ORDER_CODES[branchId] || 'ORD';
+  const counterRef = doc(db, 'counters', branchId);
+
+  try {
+    const nextNumber = await runTransaction(db, async (transaction) => {
+      const counterSnap = await transaction.get(counterRef);
+      const currentRaw = counterSnap.exists() ? Number(counterSnap.data()?.lastOrderNumber) : 0;
+      const current = Number.isFinite(currentRaw) && currentRaw >= 0 ? Math.floor(currentRaw) : 0;
+      const next = current + 1;
+
+      transaction.set(
+        counterRef,
+        {
+          branchId,
+          lastOrderNumber: next,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      return next;
+    });
+
+    return `${branchCode}-${String(nextNumber).padStart(3, '0')}`;
+  } catch (error) {
+    logFirestoreError(error, OperationType.WRITE, `counters/${branchId}`);
+    const fallbackNum = Math.floor(1000 + Math.random() * 9000);
+    return `${branchCode}-${fallbackNum}`;
+  }
+}
 
 const STORE_BROADCAST_CHANNEL = 'saheb_elsaada_store_sync_v1';
 export const ORDER_CANCEL_WINDOW_MS = 15 * 60 * 1000;
@@ -913,19 +952,13 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
     [persistBranch, syncGalleryToFirestore]
   );
 
-  // Online Orders -> Saved directly to Cloud Firestore `orders` collection via addDoc
+  // Online Orders -> Sequential per-branch counter via Firestore transaction + saved to `orders`
   const addOrder = useCallback(
-    (
+    async (
       branchId: BranchId,
       entry: Omit<OnlineOrder, 'id' | 'status' | 'createdAt' | 'branchId'>
-    ): OnlineOrder => {
-      const prefix =
-        branchId === 'branch_tagamoa'
-          ? 'TAG-ORD'
-          : branchId === 'branch_zayed'
-          ? 'ZAYED-ORD'
-          : 'MOEZ-ORD';
-      const orderCode = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+    ): Promise<OnlineOrder> => {
+      const orderCode = await generateSequentialOrderCode(branchId);
       const createdAt = new Date().toISOString();
 
       const created: OnlineOrder = {

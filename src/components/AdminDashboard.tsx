@@ -87,9 +87,10 @@ import {
 } from '../utils/orderAlertSound.ts';
 import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
 import {
-  printThermalReceipt,
+  DEFAULT_PRINT_ERROR_AR,
   type PrintReceiptStatus,
 } from '../utils/printThermalReceipt.ts';
+import { ThermalReceiptPortal } from './ThermalReceiptPortal.tsx';
 import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
 import { normalizeEgyptianPhoneInput } from '../utils/egyptianPhone.ts';
 
@@ -503,18 +504,84 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [receiptPrintStates, setReceiptPrintStates] = useState<
     Record<string, { status: PrintReceiptStatus; error?: string }>
   >({});
+  const [printingOrder, setPrintingOrder] = useState<{
+    order: OnlineOrder;
+    branchConfig: BranchConfig;
+  } | null>(null);
 
   const handlePrintOrderReceipt = (order: OnlineOrder, branchCfg: BranchConfig) => {
     const orderKey = order.firestoreDocId || order.id;
-    printThermalReceipt(order, branchCfg, {
-      onStatusChange: (status, errorMessage) => {
-        setReceiptPrintStates((prev) => ({
-          ...prev,
-          [orderKey]: { status, error: errorMessage },
-        }));
-      },
-    });
+    setReceiptPrintStates((prev) => ({
+      ...prev,
+      [orderKey]: { status: 'loading' },
+    }));
+    setPrintingOrder({ order, branchConfig: branchCfg });
   };
+
+  useEffect(() => {
+    if (!printingOrder) return;
+
+    const orderKey = printingOrder.order.firestoreDocId || printingOrder.order.id;
+    let finished = false;
+    let fallbackTimer: number | null = null;
+
+    const finishPrint = (status: PrintReceiptStatus = 'ready', errorMessage?: string) => {
+      if (finished) return;
+      finished = true;
+      if (fallbackTimer !== null) {
+        window.clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      setReceiptPrintStates((prev) => ({
+        ...prev,
+        [orderKey]: { status, error: errorMessage },
+      }));
+      setPrintingOrder(null);
+    };
+
+    const handleAfterPrint = () => {
+      finishPrint('ready');
+    };
+
+    window.addEventListener('afterprint', handleAfterPrint);
+
+    const mediaQueryList =
+      typeof window.matchMedia === 'function' ? window.matchMedia('print') : null;
+    const handleMediaChange = (event: MediaQueryListEvent) => {
+      if (!event.matches) {
+        finishPrint('ready');
+      }
+    };
+    if (mediaQueryList && typeof mediaQueryList.addEventListener === 'function') {
+      mediaQueryList.addEventListener('change', handleMediaChange);
+    }
+
+    const printTimer = window.setTimeout(() => {
+      try {
+        if (typeof window === 'undefined' || typeof window.print !== 'function') {
+          throw new Error('window.print is unavailable');
+        }
+        window.print();
+        // Safety fallback for mobile WebViews that do not dispatch afterprint when closing print preview
+        fallbackTimer = window.setTimeout(() => {
+          finishPrint('ready');
+        }, 15000);
+      } catch {
+        finishPrint('error', DEFAULT_PRINT_ERROR_AR);
+      }
+    }, 150);
+
+    return () => {
+      window.clearTimeout(printTimer);
+      if (fallbackTimer !== null) {
+        window.clearTimeout(fallbackTimer);
+      }
+      window.removeEventListener('afterprint', handleAfterPrint);
+      if (mediaQueryList && typeof mediaQueryList.removeEventListener === 'function') {
+        mediaQueryList.removeEventListener('change', handleMediaChange);
+      }
+    };
+  }, [printingOrder]);
   const [editingMenuId, setEditingMenuId] = useState<string | null>(null);
   const [mTitleAr, setMTitleAr] = useState('');
   const [mTitleEn, setMTitleEn] = useState('');
@@ -4022,6 +4089,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
         </div>
+      )}
+      {printingOrder && (
+        <ThermalReceiptPortal
+          order={printingOrder.order}
+          branchConfig={printingOrder.branchConfig}
+        />
       )}
     </section>
   );

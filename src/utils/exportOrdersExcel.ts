@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import type { BranchConfig, Lang, OnlineOrder } from '../types.ts';
+import { computeOrderAmounts } from './printThermalReceipt.ts';
 
 function sanitizeExcelText(value: string | undefined | null): string {
   if (!value) return '';
@@ -30,6 +31,19 @@ function formatOrderTimestamp(rawIso: string): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
 }
 
+interface ExportOrderRow {
+  'رقم الطلب': string;
+  'التاريخ والوقت': string;
+  'الفرع': string;
+  'اسم العميل': string;
+  'رقم الهاتف': string;
+  'العنوان': string;
+  'الأصناف': string;
+  'الإجمالي': number | string;
+  'الحالة': string;
+  'ملاحظات': string;
+}
+
 export function exportOrdersToExcel(
   orders: OnlineOrder[],
   branchConfig: BranchConfig,
@@ -40,7 +54,14 @@ export function exportOrdersToExcel(
 
   const defaultBranchName = branchConfig.shortNameAr || branchConfig.nameAr || branchConfig.id;
 
-  const rows = orders.map((order) => {
+  let activeOrdersCount = 0;
+  let cancelledOrdersCount = 0;
+  let cancelledOrdersTotal = 0;
+  let activeSubtotalSum = 0;
+  let activeDeliveryFeesSum = 0;
+  let activeGrandNetTotal = 0;
+
+  const rows: ExportOrderRow[] = orders.map((order) => {
     const orderBranchCfg =
       order.branchId && branchConfigs?.[order.branchId]
         ? branchConfigs[order.branchId]
@@ -61,6 +82,18 @@ export function exportOrdersToExcel(
         ? 'استلام من الفرع'
         : order.address || '';
 
+    const { subtotal, deliveryFee, finalTotal } = computeOrderAmounts(order);
+
+    if (order.status === 'cancelled') {
+      cancelledOrdersCount += 1;
+      cancelledOrdersTotal += finalTotal;
+    } else {
+      activeOrdersCount += 1;
+      activeSubtotalSum += subtotal;
+      activeDeliveryFeesSum += deliveryFee;
+      activeGrandNetTotal += finalTotal;
+    }
+
     return {
       'رقم الطلب': sanitizeExcelText(order.id),
       'التاريخ والوقت': formatOrderTimestamp(order.createdAt),
@@ -69,15 +102,73 @@ export function exportOrdersToExcel(
       'رقم الهاتف': sanitizeExcelText(order.phone),
       'العنوان': sanitizeExcelText(addressText),
       'الأصناف': sanitizeExcelText(itemsSummary),
-      'الإجمالي': typeof order.totalAmount === 'number' && Number.isFinite(order.totalAmount)
-        ? order.totalAmount
-        : 0,
+      'الإجمالي': finalTotal,
       'الحالة': STATUS_LABELS_AR[order.status] || order.status,
       'ملاحظات': sanitizeExcelText(order.notes || ''),
     };
   });
 
-  const ws = XLSX.utils.json_to_sheet(rows);
+  const createEmptyRow = (): ExportOrderRow => ({
+    'رقم الطلب': '',
+    'التاريخ والوقت': '',
+    'الفرع': '',
+    'اسم العميل': '',
+    'رقم الهاتف': '',
+    'العنوان': '',
+    'الأصناف': '',
+    'الإجمالي': '',
+    'الحالة': '',
+    'ملاحظات': '',
+  });
+
+  const summaryRows: ExportOrderRow[] = [
+    createEmptyRow(),
+    {
+      ...createEmptyRow(),
+      'رقم الطلب': 'ملخص الحسابات',
+      'الأصناف': 'البيان المحاسبي',
+      'الإجمالي': 'القيمة / العدد',
+      'ملاحظات': 'ملاحظة توضيحية',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'إجمالي عدد الطلبات الفعالة (باستبعاد الملغي)',
+      'الإجمالي': activeOrdersCount,
+      'ملاحظات': 'عدد الطلبات الداخلة في الإيراد',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'إجمالي عدد الطلبات الملغية',
+      'الإجمالي': cancelledOrdersCount,
+      'ملاحظات': 'مستبعدة من صافي الإيرادات',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'إجمالي قيمة الطلبات الملغية (للشفافية فقط — غير مضافة للإيراد)',
+      'الإجمالي': Number(cancelledOrdersTotal.toFixed(2)),
+      'ملاحظات': 'ج.م (لا تُجمع مع المبيعات)',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'إجمالي قيمة الأصناف (Subtotal) — للطلبات الفعالة',
+      'الإجمالي': Number(activeSubtotalSum.toFixed(2)),
+      'ملاحظات': 'ج.م',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'إجمالي رسوم التوصيل — للطلبات الفعالة',
+      'الإجمالي': Number(activeDeliveryFeesSum.toFixed(2)),
+      'ملاحظات': 'ج.م',
+    },
+    {
+      ...createEmptyRow(),
+      'الأصناف': 'الإجمالي النهائي الصافي للمبيعات (Grand Net Total)',
+      'الإجمالي': Number(activeGrandNetTotal.toFixed(2)),
+      'ملاحظات': 'ج.م — للطلبات الفعالة فقط',
+    },
+  ];
+
+  const ws = XLSX.utils.json_to_sheet([...rows, ...summaryRows]);
 
   ws['!cols'] = [
     { wch: 18 }, // رقم الطلب
@@ -86,10 +177,10 @@ export function exportOrdersToExcel(
     { wch: 22 }, // اسم العميل
     { wch: 16 }, // رقم الهاتف
     { wch: 32 }, // العنوان
-    { wch: 44 }, // الأصناف
-    { wch: 14 }, // الإجمالي
+    { wch: 50 }, // الأصناف / البيان المحاسبي
+    { wch: 16 }, // الإجمالي
     { wch: 18 }, // الحالة
-    { wch: 28 }, // ملاحظات
+    { wch: 30 }, // ملاحظات
   ];
 
   // Enable Right-to-Left layout for Arabic Excel display

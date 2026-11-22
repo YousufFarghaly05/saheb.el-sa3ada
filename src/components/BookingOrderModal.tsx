@@ -46,7 +46,7 @@ interface BookingOrderModalProps {
   onClearCart: () => void;
   onSubmitOrder: (
     entry: Omit<OnlineOrder, 'id' | 'status' | 'createdAt' | 'branchId'>
-  ) => OnlineOrder;
+  ) => Promise<OnlineOrder> | OnlineOrder;
 }
 
 export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
@@ -142,42 +142,45 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
       return;
     }
 
-    // Check Firestore blockedPhones blacklist before placing the order
+    // Check Firestore blockedPhones blacklist and generate sequential order number
     setIsCheckingPhone(true);
+    let createdOrder: OnlineOrder;
+    const isTransfer = paymentMethod === 'instapay_vodafone';
     try {
-      const blockedSnap = await getDoc(doc(db, 'blockedPhones', cleanPhone));
-      if (blockedSnap.exists()) {
-        setValidationError(BLOCKED_PHONE_ERROR_AR);
-        return;
+      try {
+        const blockedSnap = await getDoc(doc(db, 'blockedPhones', cleanPhone));
+        if (blockedSnap.exists()) {
+          setValidationError(BLOCKED_PHONE_ERROR_AR);
+          return;
+        }
+      } catch (err) {
+        logFirestoreError(err, OperationType.GET, `blockedPhones/${cleanPhone}`);
       }
-    } catch (err) {
-      logFirestoreError(err, OperationType.GET, `blockedPhones/${cleanPhone}`);
+
+      const nowTime = new Date().toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      createdOrder = await onSubmitOrder({
+        customerId: customer?.id,
+        customerName: customerName.trim(),
+        phone: cleanPhone,
+        serviceType,
+        address:
+          serviceType === 'delivery'
+            ? address.trim()
+            : `استلام من الفرع - ${branchConfig.addressAr}`,
+        requestedTime: nowTime,
+        items: cart,
+        totalAmount: cartTotal,
+        paymentMethod,
+        paymentStatus: isTransfer ? 'transfer_submitted' : 'pending_cod',
+        transferSender: isTransfer ? transferSender.trim() : undefined,
+        notes: notes.trim(),
+      });
     } finally {
       setIsCheckingPhone(false);
     }
-
-    const nowTime = new Date().toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    const isTransfer = paymentMethod === 'instapay_vodafone';
-    const createdOrder = onSubmitOrder({
-      customerId: customer?.id,
-      customerName: customerName.trim(),
-      phone: cleanPhone,
-      serviceType,
-      address:
-        serviceType === 'delivery'
-          ? address.trim()
-          : `استلام من الفرع - ${branchConfig.addressAr}`,
-      requestedTime: nowTime,
-      items: cart,
-      totalAmount: cartTotal,
-      paymentMethod,
-      paymentStatus: isTransfer ? 'transfer_submitted' : 'pending_cod',
-      transferSender: isTransfer ? transferSender.trim() : undefined,
-      notes: notes.trim(),
-    });
 
     const itemsLines = cart
       .map((c) => `• ${c.titleAr} (×${c.quantity}) = ${c.price * c.quantity} ج.م`)
