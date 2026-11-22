@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Calendar, Clock, Megaphone, UtensilsCrossed } from 'lucide-react';
+import { Clock, Megaphone, UtensilsCrossed } from 'lucide-react';
 import type { BranchConfig, Lang, ShowSchedule } from '../types.ts';
 import { getTranslations } from '../i18n/translations.ts';
 
@@ -71,14 +71,12 @@ interface ShowsScheduleProps {
   lang: Lang;
   branchConfig: BranchConfig;
   shows: ShowSchedule[];
-  onReserveForShow: (show: ShowSchedule) => void;
 }
 
 export function ShowsSchedule({
   lang,
   branchConfig,
   shows,
-  onReserveForShow,
 }: ShowsScheduleProps) {
   const t = getTranslations(lang);
   const activeShows = shows.filter((s) => s.active);
@@ -155,7 +153,7 @@ export function ShowsSchedule({
                       </span>
                     </div>
 
-                    <div className="p-5 pb-0">
+                    <div className="p-5">
                       <div className="flex items-start gap-2 text-sm font-semibold text-[#F5F0E6]">
                         <Megaphone className="mt-0.5 h-4 w-4 shrink-0 text-[#D4AF37]" aria-hidden="true" />
                         <span>{singer}</span>
@@ -180,17 +178,6 @@ export function ShowsSchedule({
                         </div>
                       </div>
                     </div>
-                  </div>
-
-                  <div className="p-5 pt-4">
-                    <button
-                      type="button"
-                      onClick={() => onReserveForShow(show)}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-[#D4AF37]/35 bg-[#25201A] px-3.5 py-2 text-xs font-semibold text-[#F5F0E6] hover:bg-[#D4AF37] hover:text-[#141210] transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>{t.shows.bookShowBtn}</span>
-                    </button>
                   </div>
                 </article>
               );

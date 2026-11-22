@@ -11,7 +11,6 @@ import {
   Heart,
   Plus,
   History,
-  Calendar,
   RotateCcw,
   Clock,
   ChefHat,
@@ -32,7 +31,6 @@ import type {
   Lang,
   MenuItem,
   OnlineOrder,
-  Reservation,
 } from '../types.ts';
 import { getTranslations } from '../i18n/translations.ts';
 import { ResilientImage } from './ResilientImage.tsx';
@@ -48,7 +46,6 @@ interface CustomerAuthModalProps {
   onClose: () => void;
   lang: Lang;
   customer: CustomerUser | null;
-  customerReservations: Reservation[];
   customerOrders: OnlineOrder[];
   favoriteDishes: MenuItem[];
   onToggleFavorite: (menuItemId: string) => void;
@@ -170,7 +167,6 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   onClose,
   lang,
   customer,
-  customerReservations,
   customerOrders,
   favoriteDishes,
   onToggleFavorite,
@@ -190,7 +186,7 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
   const currency = lang === 'ar' ? 'ج.م' : 'EGP';
   const [tab, setTab] = useState<'login' | 'signup'>('login');
   const [accountSection, setAccountSection] = useState<
-    'profile' | 'favorites' | 'order_history' | 'reservations'
+    'profile' | 'favorites' | 'order_history'
   >('profile');
   const [repeatedOrderId, setRepeatedOrderId] = useState<string | null>(null);
   const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | BookingStatus>('all');
@@ -586,18 +582,6 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                     {hasUnreadStatusUpdate && (
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                     )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAccountSection('reservations')}
-                    className={`px-3.5 py-2 text-xs font-bold cursor-pointer border flex items-center gap-1.5 transition-colors ${
-                      accountSection === 'reservations'
-                        ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'
-                        : 'bg-[#121212] text-[#C9C1B1] border-[#D4AF37]/30 hover:border-[#D4AF37]/60'
-                    }`}
-                  >
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span>{t.reservationsTab} ({customerReservations.length})</span>
                   </button>
                 </div>
 
@@ -1320,53 +1304,6 @@ export const CustomerAuthModal: React.FC<CustomerAuthModalProps> = ({
                 </div>
                 );
               })()}
-
-              {accountSection === 'reservations' && (
-                <div className="space-y-3">
-                  <h4 className="font-bold text-xs sm:text-sm text-[#D4AF37] flex items-center gap-2">
-                    <Calendar className="w-4 h-4" />
-                    <span>{t.myReservationsTitle}</span>
-                  </h4>
-                  {customerReservations.length === 0 ? (
-                    <p className="text-xs text-[#9E9585] bg-[#121212] border border-[#D4AF37]/20 p-6 text-center">
-                      {t.noReservationsYet}
-                    </p>
-                  ) : (
-                    <div className="space-y-2.5">
-                      {customerReservations.map((r) => {
-                        const { cls, cardCls, dotCls, isActive, Icon } = getOrderStatusStyle(r.status);
-                        const statusLabel =
-                          getTranslations(lang).admin.statuses[r.status] || r.status;
-                        return (
-                          <div
-                            key={r.id}
-                            className={`border p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs ${cardCls}`}
-                          >
-                            <div>
-                              <span className="font-mono font-bold text-[#D4AF37]">#{r.id}</span>
-                              <p className="text-[#F7F3E9] mt-1">
-                                {r.date} · {r.time} ({r.guests}{' '}
-                                {lang === 'ar' ? 'أفراد' : 'guests'})
-                              </p>
-                            </div>
-                            <span
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 border text-[11px] font-bold ${cls}`}
-                            >
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls} ${
-                                  isActive ? 'animate-pulse' : ''
-                                }`}
-                              />
-                              <Icon className="w-3.5 h-3.5 shrink-0" />
-                              <span>{statusLabel}</span>
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           ) : (
             /* Login / Signup Tabs */

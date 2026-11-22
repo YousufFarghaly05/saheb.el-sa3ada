@@ -20,7 +20,6 @@ import type {
   MenuItem,
   ShowSchedule,
   GalleryPhoto,
-  Reservation,
   OnlineOrder,
   BookingStatus,
   CustomerReview,
@@ -223,9 +222,6 @@ function normalizeBranchStore(
       Array.isArray(parsed.gallery) && parsed.gallery.length && !hasLegacyGallery
         ? parsed.gallery
         : fallback.gallery,
-    reservations: Array.isArray(parsed.reservations)
-      ? parsed.reservations
-      : fallback.reservations,
     orders: Array.isArray(parsed.orders) ? parsed.orders : fallback.orders,
     branchSettings:
       parsed.branchSettings && typeof parsed.branchSettings === 'object'
@@ -741,7 +737,7 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
     [persistBranch, syncOffersToFirestore]
   );
 
-  // Branch CMS Announcements & Reservation Notes (Admin Only -> Synced to Firestore)
+  // Branch CMS Announcements & Special Offers (Admin Only -> Synced to Firestore)
   const updateCmsSettings = useCallback(
     (branchId: BranchId, settings: Partial<BranchCmsSettings>) => {
       if (!isAdminEmail(auth.currentUser?.email)) return;
@@ -915,56 +911,6 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
       );
     },
     [persistBranch, syncGalleryToFirestore]
-  );
-
-  // Reservations CRUD
-  const addReservation = useCallback(
-    (
-      branchId: BranchId,
-      entry: Omit<Reservation, 'id' | 'status' | 'createdAt' | 'branchId'>
-    ): Reservation => {
-      const prefix =
-        branchId === 'branch_tagamoa'
-          ? 'TAG-RES'
-          : branchId === 'branch_zayed'
-          ? 'ZAYED-RES'
-          : 'MOEZ-RES';
-      const created: Reservation = {
-        ...entry,
-        branchId,
-        id: `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      };
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        reservations: [created, ...prev.reservations],
-      }));
-      return created;
-    },
-    [persistBranch]
-  );
-
-  const updateReservationStatus = useCallback(
-    (branchId: BranchId, id: string, status: BookingStatus) => {
-      if (!isAdminEmail(auth.currentUser?.email)) return;
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        reservations: prev.reservations.map((r) => (r.id === id ? { ...r, status } : r)),
-      }));
-    },
-    [persistBranch]
-  );
-
-  const deleteReservation = useCallback(
-    (branchId: BranchId, id: string) => {
-      if (!isAdminEmail(auth.currentUser?.email)) return;
-      persistBranch(branchId, (prev) => ({
-        ...prev,
-        reservations: prev.reservations.filter((r) => r.id !== id),
-      }));
-    },
-    [persistBranch]
   );
 
   // Online Orders -> Saved directly to Cloud Firestore `orders` collection via addDoc
@@ -1390,9 +1336,6 @@ export function useRestaurantStore(options?: { isAdminAuthenticated?: boolean })
     addGalleryPhoto,
     addGalleryPhotosBulk,
     deleteGalleryPhoto,
-    addReservation,
-    updateReservationStatus,
-    deleteReservation,
     addOrder,
     updateOrderStatus,
     cancelOrderByCustomer,

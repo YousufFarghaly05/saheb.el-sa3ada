@@ -226,8 +226,8 @@ export const LocationContact: React.FC<LocationContactProps> = ({
 
   const waInquiryText =
     lang === 'ar'
-      ? `مرحباً مطعم وكافيه صاحب السعادة (${branchConfig.shortNameAr})، أود الاستفسار عن حجز طاولة / طلب توصيل.`
-      : `Hello Saheb El-Saada (${branchConfig.shortNameEn}), I would like to inquire about a reservation or delivery order.`;
+      ? `مرحباً مطعم وكافيه صاحب السعادة (${branchConfig.shortNameAr})، أود الاستفسار عن طلب توصيل أو تيك أواي.`
+      : `Hello Saheb El-Saada (${branchConfig.shortNameEn}), I would like to inquire about a delivery or takeaway order.`;
 
   const handleCopyQrLink = () => {
     navigator.clipboard?.writeText(activeQrUrl).catch(() => {});

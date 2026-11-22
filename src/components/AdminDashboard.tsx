@@ -66,7 +66,6 @@ import type {
   MenuCategory,
   MenuItem,
   OnlineOrder,
-  Reservation,
   ShowSchedule,
 } from '../types.ts';
 import {
@@ -86,6 +85,7 @@ import {
   unlockAudioContext,
 } from '../utils/orderAlertSound.ts';
 import { exportOrdersToExcel } from '../utils/exportOrdersExcel.ts';
+import { printThermalReceipt } from '../utils/printThermalReceipt.ts';
 import { auth, db, isAdminEmail, logFirestoreError, OperationType } from '../firebase.ts';
 import { normalizeEgyptianPhoneInput } from '../utils/egyptianPhone.ts';
 
@@ -112,7 +112,6 @@ interface AdminDashboardProps {
   menu: MenuItem[];
   shows: ShowSchedule[];
   gallery: GalleryPhoto[];
-  reservations: Reservation[];
   orders: OnlineOrder[];
   onAddMenu: (item: Omit<MenuItem, 'id'>) => void;
   onUpdateMenu: (id: string, item: Partial<MenuItem>) => void;
@@ -123,8 +122,6 @@ interface AdminDashboardProps {
   onAddPhoto: (photo: Omit<GalleryPhoto, 'id'>) => void;
   onAddPhotosBulk: (photos: Omit<GalleryPhoto, 'id'>[]) => void;
   onDeletePhoto: (id: string) => void;
-  onUpdateReservationStatus: (id: string, status: BookingStatus) => void;
-  onDeleteReservation: (id: string) => void;
   onUpdateOrderStatus: (id: string, status: BookingStatus, branchId?: BranchId) => void;
   onAcknowledgeOrderCancellation?: (branchId: BranchId, orderId: string) => void;
   onDeleteOrder: (id: string, branchId?: BranchId) => void;
@@ -212,7 +209,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   menu,
   shows,
   gallery,
-  reservations,
   orders,
   onAddMenu,
   onUpdateMenu,
@@ -223,8 +219,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onAddPhoto,
   onAddPhotosBulk,
   onDeletePhoto,
-  onUpdateReservationStatus,
-  onDeleteReservation,
   onUpdateOrderStatus,
   onAcknowledgeOrderCancellation,
   onDeleteOrder,
@@ -495,15 +489,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, [stores, adminSession, firestoreOrdersReady, orderSoundEnabled]);
 
-  // Menu Form, Orders & Reservations Filter State
+  // Menu Form & Orders Filter State
   const [menuAdminSearch, setMenuAdminSearch] = useState('');
   const [orderSearch, setOrderSearch] = useState('');
   const [orderBranchFilter, setOrderBranchFilter] = useState<'all' | BranchId>(adminBranch);
   const [orderDateFrom, setOrderDateFrom] = useState('');
   const [orderDateTo, setOrderDateTo] = useState('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<'all' | BookingStatus>('all');
-  const [reservationSearch, setReservationSearch] = useState('');
-  const [reservationStatusFilter, setReservationStatusFilter] = useState<'all' | BookingStatus>('all');
   const [editingMenuId, setEditingMenuId] = useState<string | null>(null);
   const [mTitleAr, setMTitleAr] = useState('');
   const [mTitleEn, setMTitleEn] = useState('');
@@ -526,18 +518,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [sBandTime, setSBandTime] = useState('11:00 PM');
   const [sNoteAr, setSNoteAr] = useState('');
 
-  // Site Announcement Banner & Reservation Notes CMS State
+  // Site Announcement Banner & Special Offers CMS State
   const [cmsAnnouncementEnabled, setCmsAnnouncementEnabled] = useState(
     Boolean(cmsSettings?.announcementEnabled)
   );
   const [cmsAnnouncementAr, setCmsAnnouncementAr] = useState(cmsSettings?.announcementTextAr || '');
   const [cmsAnnouncementEn, setCmsAnnouncementEn] = useState(cmsSettings?.announcementTextEn || '');
-  const [cmsReservationNoteAr, setCmsReservationNoteAr] = useState(
-    cmsSettings?.reservationNoteAr || ''
-  );
-  const [cmsReservationNoteEn, setCmsReservationNoteEn] = useState(
-    cmsSettings?.reservationNoteEn || ''
-  );
   const [cmsInstagramUrl, setCmsInstagramUrl] = useState(
     cmsSettings?.instagramUrl !== undefined
       ? cmsSettings.instagramUrl
@@ -595,8 +581,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setCmsAnnouncementEnabled(Boolean(cmsSettings?.announcementEnabled));
     setCmsAnnouncementAr(cmsSettings?.announcementTextAr || '');
     setCmsAnnouncementEn(cmsSettings?.announcementTextEn || '');
-    setCmsReservationNoteAr(cmsSettings?.reservationNoteAr || '');
-    setCmsReservationNoteEn(cmsSettings?.reservationNoteEn || '');
     setCmsInstagramUrl(
       cmsSettings?.instagramUrl !== undefined
         ? cmsSettings.instagramUrl
@@ -669,8 +653,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setQuickUploadMenuId(null);
     setUploadNotice(null);
     setMenuAdminSearch('');
-    setReservationSearch('');
-    setReservationStatusFilter('all');
     setMTitleAr('');
     setMTitleEn('');
     setMDescAr('');
@@ -1122,8 +1104,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       announcementEnabled: cmsAnnouncementEnabled,
       announcementTextAr: cmsAnnouncementAr.trim(),
       announcementTextEn: cmsAnnouncementEn.trim(),
-      reservationNoteAr: cmsReservationNoteAr.trim(),
-      reservationNoteEn: cmsReservationNoteEn.trim(),
       instagramUrl: cmsInstagramUrl.trim(),
       facebookUrl: cmsFacebookUrl.trim(),
       tiktokUrl: cmsTiktokUrl.trim(),
@@ -1205,20 +1185,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     orderStatusFilter !== 'all' ||
     orderBranchFilter !== adminBranch;
 
-  const filteredReservations = reservations.filter((r) => {
-    const matchesStatus =
-      reservationStatusFilter === 'all' || r.status === reservationStatusFilter;
-    if (!matchesStatus) return false;
-    const q = reservationSearch.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      r.customerName.toLowerCase().includes(q) ||
-      r.phone.toLowerCase().includes(q) ||
-      r.id.toLowerCase().includes(q)
-    );
-  });
-
-  const totalBookingsAndOrders = reservations.length + orders.length;
+  const totalOrdersCount = orders.length;
   const activeBranchLabel = lang === 'ar' ? branchConfig.shortNameAr : branchConfig.shortNameEn;
   const orderScopeLabel =
     orderBranchFilter === 'all'
@@ -1399,7 +1366,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               const cfg = branchConfigs[bId];
               const isSelected = adminBranch === bId;
               const bStore = stores[bId];
-              const pendingTotal = bStore.orders.length + bStore.reservations.length;
+              const pendingTotal = bStore.orders.length;
               const branchUnreadCancels = bStore.orders.filter(
                 (o) =>
                   o.status === 'cancelled' &&
@@ -1815,7 +1782,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
               )}
               <span className="text-xs px-2 py-0.5 bg-black/20 font-mono">
-                {totalBookingsAndOrders}
+                {totalOrdersCount}
               </span>
             </div>
           </button>
@@ -2436,7 +2403,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         {/* TAB 3: ANNOUNCEMENTS & SPECIAL EVENTS CMS */}
         {activeTab === 'shows' && (
           <div className="space-y-8">
-            {/* CMS Top Announcement Banner & Reservation Notes Editor */}
+            {/* CMS Top Announcement Banner Editor */}
             <form
               onSubmit={handleCmsSettingsSubmit}
               className="bg-[#1E1E1E] border border-[#D4AF37]/45 p-6 space-y-5"
@@ -2454,8 +2421,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </h3>
                     <p className="text-xs text-[#C9C1B1] mt-0.5">
                       {lang === 'ar'
-                        ? `تحكم كامل في الشريط العلوي للموقع وتنويهات نافذة حجز الطاولات لفرع (${activeBranchLabel}).`
-                        : `Manage the top announcement banner and table booking notices for (${activeBranchLabel}).`}
+                        ? `تحكم كامل في الشريط العلوي للموقع والعروض الخاصة لفرع (${activeBranchLabel}).`
+                        : `Manage the top announcement banner and special offers for (${activeBranchLabel}).`}
                     </p>
                   </div>
                 </div>
@@ -2478,8 +2445,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   <span>
                     {lang === 'ar'
-                      ? `تم حفظ التنويهات وإعدادات الحجز لـ ${activeBranchLabel} بنجاح.`
-                      : `Announcements and booking notes saved for ${activeBranchLabel}.`}
+                      ? `تم حفظ التنويهات والإعدادات لـ ${activeBranchLabel} بنجاح.`
+                      : `Announcements and settings saved for ${activeBranchLabel}.`}
                   </span>
                 </div>
               )}
@@ -2508,35 +2475,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     onChange={(e) => setCmsAnnouncementEn(e.target.value)}
                     placeholder="e.g. Special family grill platters available daily"
                     className="w-full px-3.5 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                    {lang === 'ar'
-                      ? 'تنويه خاص داخل نافذة حجز الطاولات (عربي)'
-                      : 'Table Reservation Modal Note (Arabic)'}
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={cmsReservationNoteAr}
-                    onChange={(e) => setCmsReservationNoteAr(e.target.value)}
-                    placeholder="مثال: تتوفر صالات عائلية ومناطق جلوس خارجية طوال اليوم — للحجوزات الكبيرة يُفضل الحجز المسبق"
-                    className="w-full px-3.5 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#C9C1B1] mb-1.5">
-                    {lang === 'ar'
-                      ? 'تنويه خاص داخل نافذة حجز الطاولات (إنجليزي)'
-                      : 'Table Reservation Modal Note (English)'}
-                  </label>
-                  <textarea
-                    rows={2}
-                    dir="ltr"
-                    value={cmsReservationNoteEn}
-                    onChange={(e) => setCmsReservationNoteEn(e.target.value)}
-                    placeholder="e.g. Family halls and outdoor terrace seating available daily"
-                    className="w-full px-3.5 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
                   />
                 </div>
               </div>
@@ -3230,6 +3168,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                       <button
                         type="button"
+                        onClick={() => printThermalReceipt(o, orderBranchCfg)}
+                        title={
+                          lang === 'ar'
+                            ? 'طباعة الفاتورة لطابعة الكاشير الحرارية'
+                            : 'Print Thermal Receipt'
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-[#121212] hover:bg-[#D4AF37] border border-[#D4AF37]/60 text-[#D4AF37] hover:text-[#121212] text-xs font-bold cursor-pointer transition-colors"
+                      >
+                        <Printer className="w-3.5 h-3.5 shrink-0" />
+                        <span>{lang === 'ar' ? 'طباعة الفاتورة' : 'Print Receipt'}</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => setConfirmDeleteOrder({ ...o, branchId: orderBranchId })}
                         title={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
                         aria-label={lang === 'ar' ? 'حذف الطلب نهائياً' : 'Delete order permanently'}
@@ -3315,198 +3267,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     );
                   })}
                 </div>
-              )}
-            </div>
-
-            {/* Table Reservations Section */}
-            <div className="space-y-4">
-              <div className="border-b border-[#D4AF37]/25 pb-2 flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-bold text-lg text-[#D4AF37]">
-                  {t.bookings.reservationsTitle} — {activeBranchLabel} ({reservations.length})
-                </h3>
-                {(reservationSearch.trim() !== '' || reservationStatusFilter !== 'all') && (
-                  <span className="text-xs font-mono px-2.5 py-1 bg-[#1E1E1E] border border-[#D4AF37]/30 text-[#D4AF37]">
-                    {filteredReservations.length} / {reservations.length}
-                  </span>
-                )}
-              </div>
-
-              {/* Search Bar & Status Filter Dropdown */}
-              <div className="bg-[#1E1E1E] border border-[#D4AF37]/30 p-3 flex flex-col sm:flex-row sm:items-center gap-3">
-                <div className="relative flex-1 min-w-[200px]">
-                  <Search
-                    className={`w-4 h-4 text-[#D4AF37] absolute top-1/2 -translate-y-1/2 pointer-events-none ${
-                      lang === 'ar' ? 'right-3' : 'left-3'
-                    }`}
-                    aria-hidden="true"
-                  />
-                  <input
-                    type="search"
-                    value={reservationSearch}
-                    onChange={(e) => setReservationSearch(e.target.value)}
-                    aria-label={
-                      lang === 'ar'
-                        ? 'بحث في الحجوزات باسم العميل أو الهاتف'
-                        : 'Search reservations by customer name or phone'
-                    }
-                    placeholder={
-                      lang === 'ar'
-                        ? 'ابحث باسم العميل، رقم الهاتف، أو رقم الحجز...'
-                        : 'Search by customer name, phone, or booking ID...'
-                    }
-                    className={`w-full py-2 bg-[#121212] border border-[#D4AF37]/30 text-[#F7F3E9] text-xs focus:outline-none focus:border-[#D4AF37] ${
-                      lang === 'ar' ? 'pr-9 pl-3' : 'pl-9 pr-3'
-                    }`}
-                  />
-                </div>
-
-                <div className="flex items-center gap-2 sm:w-64 shrink-0">
-                  <label htmlFor="reservation-status-filter" className="sr-only">
-                    {lang === 'ar' ? 'تصفية حسب حالة الحجز' : 'Filter by reservation status'}
-                  </label>
-                  <select
-                    id="reservation-status-filter"
-                    value={reservationStatusFilter}
-                    onChange={(e) =>
-                      setReservationStatusFilter(e.target.value as 'all' | BookingStatus)
-                    }
-                    className="w-full px-3 py-2 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-xs font-bold focus:outline-none focus:border-[#D4AF37] cursor-pointer"
-                  >
-                    <option value="all" className="bg-[#121212] text-[#F7F3E9]">
-                      {lang === 'ar' ? 'كل الحالات' : 'All Statuses'}
-                    </option>
-                    {(
-                      [
-                        'pending',
-                        'preparing',
-                        'confirmed',
-                        'completed',
-                        'cancelled',
-                      ] as BookingStatus[]
-                    ).map((st) => (
-                      <option
-                        key={`res-filter-${st}`}
-                        value={st}
-                        className="bg-[#121212] text-[#F7F3E9]"
-                      >
-                        {t.statuses[st]}
-                      </option>
-                    ))}
-                  </select>
-
-                  {(reservationSearch.trim() !== '' || reservationStatusFilter !== 'all') && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setReservationSearch('');
-                        setReservationStatusFilter('all');
-                      }}
-                      title={lang === 'ar' ? 'مسح الفلتر' : 'Clear filters'}
-                      className="p-2 bg-[#121212] border border-[#D4AF37]/35 text-[#C9C1B1] hover:text-[#D4AF37] hover:border-[#D4AF37] cursor-pointer shrink-0"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {filteredReservations.length === 0 ? (
-                <div className="bg-[#1E1E1E] border border-[#D4AF37]/25 p-8 text-center text-[#9E9585] text-sm space-y-3">
-                  <p>{t.bookings.emptyRes}</p>
-                  {reservations.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setReservationSearch('');
-                        setReservationStatusFilter('all');
-                      }}
-                      className="px-4 py-1.5 bg-[#121212] border border-[#D4AF37]/40 text-[#D4AF37] text-xs font-bold hover:bg-[#D4AF37] hover:text-[#121212] transition-colors cursor-pointer"
-                    >
-                      {lang === 'ar' ? 'عرض كل الحجوزات' : 'Show All Reservations'}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                filteredReservations.map((r) => (
-                  <div
-                    key={r.id}
-                    className="bg-[#1E1E1E] border border-[#D4AF37]/30 p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4"
-                  >
-                    <div className="space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2.5">
-                        <span className="px-2.5 py-0.5 bg-[#D4AF37] text-[#121212] font-bold text-xs font-mono">
-                          {r.id}
-                        </span>
-                        <span className="font-bold text-[#F7F3E9] text-base">
-                          {r.customerName}
-                        </span>
-                        <a
-                          href={`tel:${r.phone}`}
-                          className="text-xs text-[#D4AF37] font-mono underline"
-                          dir="ltr"
-                        >
-                          {r.phone}
-                        </a>
-                        <a
-                          href={`https://wa.me/${r.phone.replace(/\D/g, '').replace(/^0/, '20')}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-[#10B981]/20 border border-[#10B981]/40 text-[#10B981] text-xs font-bold"
-                        >
-                          <MessageCircle className="w-3 h-3" />
-                          <span>{t.bookings.whatsappReply}</span>
-                        </a>
-                      </div>
-
-                      <p className="text-xs sm:text-sm text-[#C9C1B1]">
-                        التاريخ: <strong className="text-[#F7F3E9]">{r.date}</strong> | الساعة:{' '}
-                        <strong className="text-[#F7F3E9]">{r.time}</strong> | عدد الأفراد:{' '}
-                        <strong className="text-[#D4AF37]">{r.guests}</strong> | منطقة الجلوس:{' '}
-                        <strong className="text-[#F7F3E9]">
-                          {fullT.modal.seatingOptions[r.seatingPreference]}
-                        </strong>
-                      </p>
-                      {r.notes && <p className="text-xs text-[#9E9585]">ملاحظات: {r.notes}</p>}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      {(
-                        [
-                          'pending',
-                          'preparing',
-                          'confirmed',
-                          'completed',
-                          'cancelled',
-                        ] as BookingStatus[]
-                      ).map((st) => {
-                        const active = r.status === st;
-                        return (
-                          <button
-                            key={st}
-                            type="button"
-                            onClick={() => onUpdateReservationStatus(r.id, st)}
-                            className={`px-3 py-1.5 text-xs font-bold border transition-colors cursor-pointer flex items-center gap-1 ${
-                              active
-                                ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'
-                                : 'bg-[#121212] text-[#C9C1B1] border-[#D4AF37]/25 hover:border-[#D4AF37]'
-                            }`}
-                          >
-                            {active && <Check className="w-3 h-3" />}
-                            <span>{t.statuses[st]}</span>
-                          </button>
-                        );
-                      })}
-
-                      <button
-                        type="button"
-                        onClick={() => onDeleteReservation(r.id)}
-                        className="p-2 bg-[#121212] border border-red-500/40 text-red-400 hover:bg-red-500 hover:text-white cursor-pointer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))
               )}
             </div>
           </div>
@@ -3875,7 +3635,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             branchConfigs={branchConfigs}
             stores={stores}
             orders={orders}
-            reservations={reservations}
             menu={menu}
           />
         )}

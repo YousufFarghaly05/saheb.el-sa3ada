@@ -4,7 +4,6 @@ import {
   Clock,
   Sparkles,
   UtensilsCrossed,
-  CalendarCheck,
   Compass,
   MapPin,
   CheckCircle2,
@@ -19,7 +18,6 @@ interface HeroSectionProps {
   branchConfig: BranchConfig;
   branchConfigs?: Record<BranchId, BranchConfig>;
   onSwitchBranch: (branchId: BranchId) => void;
-  onOpenReserve: () => void;
   onOpenOrder: () => void;
 }
 
@@ -29,7 +27,6 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   branchConfig,
   branchConfigs = BRANCH_CONFIGS,
   onSwitchBranch,
-  onOpenReserve,
   onOpenOrder,
 }) => {
   const t = getTranslations(lang).hero;
@@ -150,23 +147,14 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             {subheadline}
           </p>
 
-          {/* Primary & Secondary CTAs */}
+          {/* Primary CTA */}
           <div className="pt-2 flex flex-wrap items-center gap-4">
             <button
               type="button"
-              onClick={onOpenReserve}
+              onClick={onOpenOrder}
               className="inline-flex items-center gap-3 px-7 py-4 bg-[#D4AF37] hover:bg-[#e3be42] text-[#121212] font-bold text-base sm:text-lg transition-all shadow-[0_0_30px_rgba(212,175,55,0.35)] cursor-pointer"
             >
-              <CalendarCheck className="w-5 h-5" />
-              <span>{t.ctaReserve}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenOrder}
-              className="inline-flex items-center gap-2.5 px-7 py-4 bg-[#1E1E1E]/95 hover:bg-[#D4AF37]/15 text-[#F7F3E9] border border-[#D4AF37] font-bold text-base sm:text-lg transition-all cursor-pointer"
-            >
-              <UtensilsCrossed className="w-5 h-5 text-[#D4AF37]" />
+              <UtensilsCrossed className="w-5 h-5" />
               <span>{t.ctaOrderOnline}</span>
             </button>
           </div>

@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import {
   X,
   Trash2,
-  Calendar,
   Truck,
   CheckCircle2,
   MessageCircle,
@@ -12,7 +11,6 @@ import {
   Check,
   Smartphone,
   MapPin,
-  Megaphone,
 } from 'lucide-react';
 import type {
   BranchConfig,
@@ -22,7 +20,6 @@ import type {
   Lang,
   OnlineOrder,
   PaymentMethod,
-  Reservation,
 } from '../types.ts';
 import { doc, getDoc } from 'firebase/firestore';
 import { BRANCH_CONFIGS, BRANCH_ORDER } from '../data/initialData.ts';
@@ -37,26 +34,16 @@ import {
 
 interface BookingOrderModalProps {
   isOpen: boolean;
-  initialTab?: 'reservation' | 'order';
   onClose: () => void;
   lang: Lang;
   activeBranch: BranchId;
   branchConfig: BranchConfig;
   branchConfigs?: Record<BranchId, BranchConfig>;
-  reservationNotice?: string;
   onSwitchBranch: (branchId: BranchId) => void;
   cart: CartItem[];
   customer: CustomerUser | null;
   onUpdateQty: (menuItemId: string, delta: number) => void;
   onClearCart: () => void;
-  onSubmitReservation: (
-    entry: Omit<Reservation, 'id' | 'status' | 'createdAt' | 'branchId'>
-  ) => Reservation;
-  onReservationSuccess?: (payload: {
-    reservation: Reservation;
-    branchConfig: BranchConfig;
-    whatsappUrl: string;
-  }) => void;
   onSubmitOrder: (
     entry: Omit<OnlineOrder, 'id' | 'status' | 'createdAt' | 'branchId'>
   ) => OnlineOrder;
@@ -64,30 +51,21 @@ interface BookingOrderModalProps {
 
 export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   isOpen,
-  initialTab = 'order',
   onClose,
   lang,
   activeBranch,
   branchConfig,
   branchConfigs = BRANCH_CONFIGS,
-  reservationNotice,
   onSwitchBranch,
   cart,
   customer,
   onUpdateQty,
   onClearCart,
-  onSubmitReservation,
-  onReservationSuccess,
   onSubmitOrder,
 }) => {
   const t = getTranslations(lang).modal;
-  const [activeTab, setActiveTab] = useState<'order' | 'reservation'>(initialTab);
   const [customerName, setCustomerName] = useState('');
   const [phone, setPhone] = useState('');
-  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0]);
-  const [time, setTime] = useState('21:30');
-  const [guests, setGuests] = useState(4);
-  const [seatingPreference, setSeatingPreference] = useState<'indoor' | 'outdoor' | 'family'>('indoor');
   const [serviceType, setServiceType] = useState<'delivery' | 'takeaway'>('delivery');
   const [address, setAddress] = useState('');
   const [notes, setNotes] = useState('');
@@ -103,12 +81,11 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   const [submittedPaymentSummary, setSubmittedPaymentSummary] = useState<string>('');
 
   useEffect(() => {
-    setActiveTab(initialTab);
     setSubmittedWhatsAppUrl(null);
     setSubmittedRefId(null);
     setValidationError(null);
     setIsCheckingPhone(false);
-  }, [initialTab, isOpen, branchConfig.id]);
+  }, [isOpen, branchConfig.id]);
 
   useEffect(() => {
     if (customer) {
@@ -121,8 +98,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
   if (!isOpen) return null;
 
   const cartTotal = cart.reduce((acc, c) => acc + c.price * c.quantity, 0);
-  const reservationDeposit = guests * 100;
-  const payableAmount = activeTab === 'order' ? cartTotal : reservationDeposit;
+  const payableAmount = cartTotal;
   const branchShort = lang === 'ar' ? branchConfig.shortNameAr : branchConfig.shortNameEn;
 
   const handleCopy = (value: string, field: 'vf' | 'instapay') => {
@@ -153,130 +129,90 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
       return;
     }
 
-    if (activeTab === 'order') {
-      if (cart.length === 0) {
-        setValidationError(t.validationCart);
-        return;
-      }
-      if (serviceType === 'delivery' && !address.trim()) {
-        setValidationError(t.validationAddress);
-        return;
-      }
-      if (paymentMethod === 'instapay_vodafone' && !transferSender.trim()) {
-        setValidationError(t.validationTransferSender);
-        return;
-      }
-
-      // Check Firestore blockedPhones blacklist before placing the order
-      setIsCheckingPhone(true);
-      try {
-        const blockedSnap = await getDoc(doc(db, 'blockedPhones', cleanPhone));
-        if (blockedSnap.exists()) {
-          setValidationError(BLOCKED_PHONE_ERROR_AR);
-          return;
-        }
-      } catch (err) {
-        logFirestoreError(err, OperationType.GET, `blockedPhones/${cleanPhone}`);
-      } finally {
-        setIsCheckingPhone(false);
-      }
-
-      const isTransfer = paymentMethod === 'instapay_vodafone';
-      const createdOrder = onSubmitOrder({
-        customerId: customer?.id,
-        customerName: customerName.trim(),
-        phone: cleanPhone,
-        serviceType,
-        address:
-          serviceType === 'delivery'
-            ? address.trim()
-            : `استلام من الفرع - ${branchConfig.addressAr}`,
-        requestedTime: time,
-        items: cart,
-        totalAmount: cartTotal,
-        paymentMethod,
-        paymentStatus: isTransfer ? 'transfer_submitted' : 'pending_cod',
-        transferSender: isTransfer ? transferSender.trim() : undefined,
-        notes: notes.trim(),
-      });
-
-      const itemsLines = cart
-        .map((c) => `• ${c.titleAr} (×${c.quantity}) = ${c.price * c.quantity} ج.م`)
-        .join('\n');
-
-      const paymentLine = isTransfer
-        ? `تحويل فوري (${branchConfig.vodafoneCash} / ${branchConfig.instapay}) — الرقم المُحوَّل منه: ${transferSender.trim()}`
-        : 'الدفع عند الاستلام (كاش أو فيزا مع المندوب)';
-
-      const waLines = [
-        `[${branchConfig.shortNameAr}]`,
-        `🍽️ *طلب أونلاين جديد - مطعم وكافيه صاحب السعادة (${branchConfig.shortNameAr})* 🍽️`,
-        `العنوان: ${branchConfig.addressAr}`,
-        `رقم الطلب: ${createdOrder.id}`,
-        `الاسم: ${createdOrder.customerName}`,
-        `الهاتف: ${createdOrder.phone}`,
-        `نوع الاستلام: ${
-          serviceType === 'delivery' ? 'توصيل للمنزل (Delivery)' : 'سفري من الفرع (Takeaway)'
-        }`,
-        serviceType === 'delivery' ? `عنوان العميل: ${createdOrder.address}` : '',
-        `--- الأصناف ---`,
-        itemsLines,
-        `*الإجمالي:* ${cartTotal} ج.م (+ ١٢٪ خدمة و ١٤٪ ضريبة)`,
-        `طريقة الدفع: ${paymentLine}`,
-        isTransfer ? `📎 مرفق صورة إيصال التحويل في المحادثة` : '',
-        notes.trim() ? `ملاحظات: ${notes.trim()}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-
-      const waUrl = `https://wa.me/${branchConfig.whatsappIntl}?text=${encodeURIComponent(waLines)}`;
-      setSubmittedRefId(createdOrder.id);
-      setSubmittedPaymentSummary(paymentLine);
-      setSubmittedWhatsAppUrl(waUrl);
-      onClearCart();
-    } else {
-      const createdRes = onSubmitReservation({
-        customerId: customer?.id,
-        customerName: customerName.trim(),
-        phone: cleanPhone,
-        guests,
-        date,
-        time,
-        seatingPreference,
-        notes: notes.trim(),
-      });
-
-      const seatingName = t.seatingOptions[seatingPreference];
-      const waLines = [
-        `[${branchConfig.shortNameAr}]`,
-        `✨ *حجز طاولة جديد - مطعم وكافيه صاحب السعادة (${branchConfig.shortNameAr})* ✨`,
-        `العنوان: ${branchConfig.addressAr}`,
-        `رقم الحجز: ${createdRes.id}`,
-        `الاسم: ${createdRes.customerName}`,
-        `الهاتف: ${createdRes.phone}`,
-        `التاريخ: ${createdRes.date} | الساعة: ${createdRes.time}`,
-        `عدد الأفراد: ${createdRes.guests}`,
-        `منطقة الجلوس: ${seatingName}`,
-        notes.trim() ? `ملاحظات: ${notes.trim()}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-
-      const waUrl = `https://wa.me/${branchConfig.whatsappIntl}?text=${encodeURIComponent(waLines)}`;
-      setNotes('');
-      if (onReservationSuccess) {
-        onClose();
-        onReservationSuccess({
-          reservation: createdRes,
-          branchConfig,
-          whatsappUrl: waUrl,
-        });
-      } else {
-        setSubmittedRefId(createdRes.id);
-        setSubmittedPaymentSummary(seatingName);
-        setSubmittedWhatsAppUrl(waUrl);
-      }
+    if (cart.length === 0) {
+      setValidationError(t.validationCart);
+      return;
     }
+    if (serviceType === 'delivery' && !address.trim()) {
+      setValidationError(t.validationAddress);
+      return;
+    }
+    if (paymentMethod === 'instapay_vodafone' && !transferSender.trim()) {
+      setValidationError(t.validationTransferSender);
+      return;
+    }
+
+    // Check Firestore blockedPhones blacklist before placing the order
+    setIsCheckingPhone(true);
+    try {
+      const blockedSnap = await getDoc(doc(db, 'blockedPhones', cleanPhone));
+      if (blockedSnap.exists()) {
+        setValidationError(BLOCKED_PHONE_ERROR_AR);
+        return;
+      }
+    } catch (err) {
+      logFirestoreError(err, OperationType.GET, `blockedPhones/${cleanPhone}`);
+    } finally {
+      setIsCheckingPhone(false);
+    }
+
+    const nowTime = new Date().toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const isTransfer = paymentMethod === 'instapay_vodafone';
+    const createdOrder = onSubmitOrder({
+      customerId: customer?.id,
+      customerName: customerName.trim(),
+      phone: cleanPhone,
+      serviceType,
+      address:
+        serviceType === 'delivery'
+          ? address.trim()
+          : `استلام من الفرع - ${branchConfig.addressAr}`,
+      requestedTime: nowTime,
+      items: cart,
+      totalAmount: cartTotal,
+      paymentMethod,
+      paymentStatus: isTransfer ? 'transfer_submitted' : 'pending_cod',
+      transferSender: isTransfer ? transferSender.trim() : undefined,
+      notes: notes.trim(),
+    });
+
+    const itemsLines = cart
+      .map((c) => `• ${c.titleAr} (×${c.quantity}) = ${c.price * c.quantity} ج.م`)
+      .join('\n');
+
+    const paymentLine = isTransfer
+      ? `تحويل فوري (${branchConfig.vodafoneCash} / ${branchConfig.instapay}) — الرقم المُحوَّل منه: ${transferSender.trim()}`
+      : 'الدفع عند الاستلام (كاش أو فيزا مع المندوب)';
+
+    const waLines = [
+      `[${branchConfig.shortNameAr}]`,
+      `🍽️ *طلب أونلاين جديد - مطعم وكافيه صاحب السعادة (${branchConfig.shortNameAr})* 🍽️`,
+      `العنوان: ${branchConfig.addressAr}`,
+      `رقم الطلب: ${createdOrder.id}`,
+      `الاسم: ${createdOrder.customerName}`,
+      `الهاتف: ${createdOrder.phone}`,
+      `نوع الاستلام: ${
+        serviceType === 'delivery' ? 'توصيل للمنزل (Delivery)' : 'سفري من الفرع (Takeaway)'
+      }`,
+      serviceType === 'delivery' ? `عنوان العميل: ${createdOrder.address}` : '',
+      `--- الأصناف ---`,
+      itemsLines,
+      `*الإجمالي:* ${cartTotal} ج.م (+ ١٢٪ خدمة و ١٤٪ ضريبة)`,
+      `طريقة الدفع: ${paymentLine}`,
+      isTransfer ? `📎 مرفق صورة إيصال التحويل في المحادثة` : '',
+      notes.trim() ? `ملاحظات: ${notes.trim()}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const waUrl = `https://wa.me/${branchConfig.whatsappIntl}?text=${encodeURIComponent(waLines)}`;
+    setSubmittedRefId(createdOrder.id);
+    setSubmittedPaymentSummary(paymentLine);
+    setSubmittedWhatsAppUrl(waUrl);
+    onClearCart();
   };
 
   return (
@@ -290,22 +226,10 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
         className="animate-modal-panel bg-[#1E1E1E] border border-[#D4AF37] max-w-2xl w-full overflow-hidden shadow-2xl my-8"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Top Bar — 2 Tabs + Active Branch Badge */}
+        {/* Top Bar — Delivery/Takeaway Order Header + Active Branch Badge */}
         <div className="bg-[#121212] px-6 py-4 border-b border-[#D4AF37]/30 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('order');
-                setSubmittedWhatsAppUrl(null);
-                setValidationError(null);
-              }}
-              className={`px-4 py-2 text-xs sm:text-sm font-bold flex items-center gap-2 transition-colors cursor-pointer ${
-                activeTab === 'order'
-                  ? 'bg-[#D4AF37] text-[#121212]'
-                  : 'bg-[#1E1E1E] text-[#C9C1B1] hover:text-[#F7F3E9]'
-              }`}
-            >
+            <div className="px-4 py-2 text-xs sm:text-sm font-bold flex items-center gap-2 bg-[#D4AF37] text-[#121212]">
               <Truck className="w-4 h-4" />
               <span>{t.orderTab}</span>
               {cart.length > 0 && (
@@ -313,24 +237,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                   {cart.reduce((s, i) => s + i.quantity, 0)}
                 </span>
               )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab('reservation');
-                setSubmittedWhatsAppUrl(null);
-                setValidationError(null);
-              }}
-              className={`px-4 py-2 text-xs sm:text-sm font-bold flex items-center gap-2 transition-colors cursor-pointer ${
-                activeTab === 'reservation'
-                  ? 'bg-[#D4AF37] text-[#121212]'
-                  : 'bg-[#1E1E1E] text-[#C9C1B1] hover:text-[#F7F3E9]'
-              }`}
-            >
-              <Calendar className="w-4 h-4" />
-              <span>{t.reserveTab}</span>
-            </button>
+            </div>
 
             <span className="text-xs font-bold text-[#D4AF37] px-2">· {branchShort}</span>
           </div>
@@ -355,7 +262,7 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                 {t.successTitle}
               </h3>
               <p className="text-[#C9C1B1] text-sm max-w-md mx-auto leading-relaxed">
-                {activeTab === 'order' ? t.successOrderDesc : t.successReserveDesc}
+                {t.successOrderDesc}
               </p>
 
               <div className="bg-[#121212] border border-[#D4AF37]/30 p-4 max-w-md mx-auto text-xs text-[#C9C1B1] space-y-1.5">
@@ -396,13 +303,13 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
             </div>
           ) : (
             <form onSubmit={handleFormSubmit} className="space-y-5">
-              {/* Branch Selection Strip Inside Order & Reservation Modal */}
+              {/* Branch Selection Strip Inside Order Modal */}
               <div className="bg-[#121212] border border-[#D4AF37]/35 p-3.5 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-bold text-[#D4AF37] flex items-center gap-1.5">
                     <MapPin className="w-3.5 h-3.5" />
                     <span>
-                      {lang === 'ar' ? 'اختر الفرع المطلوب للطلب أو الحجز:' : 'Select Branch:'}
+                      {lang === 'ar' ? 'اختر الفرع المطلوب للطلب:' : 'Select Branch:'}
                     </span>
                   </span>
                   {cart.length > 0 && (
@@ -450,9 +357,8 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                 </div>
               )}
 
-              {/* Order Cart Summary when on Order Tab */}
-              {activeTab === 'order' && (
-                <div className="bg-[#121212] border border-[#D4AF37]/25 p-4">
+              {/* Order Cart Summary */}
+              <div className="bg-[#121212] border border-[#D4AF37]/25 p-4">
                   <div className="flex items-center justify-between mb-3">
                     <h4 className="font-bold text-sm text-[#D4AF37]">
                       {t.cartSummary} — {branchShort}
@@ -521,7 +427,6 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                     </div>
                   )}
                 </div>
-              )}
 
               {/* Common Customer Fields */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -555,71 +460,8 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                 </div>
               </div>
 
-              {/* Conditional Fields */}
-              {activeTab === 'reservation' ? (
-                <div className="space-y-4">
-                  {reservationNotice && reservationNotice.trim() && (
-                    <div className="p-3 bg-[#1B1710] border border-[#D4AF37]/45 text-xs text-[#F7F3E9] flex items-start gap-2.5 leading-relaxed">
-                      <Megaphone className="w-4 h-4 text-[#D4AF37] shrink-0 mt-0.5" aria-hidden="true" />
-                      <span>{reservationNotice}</span>
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div>
-                      <label className="block text-xs text-[#C9C1B1] mb-1.5">{t.dateLabel}</label>
-                      <input
-                        type="date"
-                        value={date}
-                        onChange={(e) => setDate(e.target.value)}
-                        className="w-full px-3 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-[#C9C1B1] mb-1.5">{t.timeLabel}</label>
-                      <input
-                        type="time"
-                        value={time}
-                        onChange={(e) => setTime(e.target.value)}
-                        className="w-full px-3 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-[#C9C1B1] mb-1.5">{t.guestsLabel}</label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={50}
-                        value={guests}
-                        onChange={(e) => setGuests(Number(e.target.value))}
-                        className="w-full px-3 py-2.5 bg-[#121212] border border-[#D4AF37]/35 text-[#F7F3E9] text-sm focus:outline-none focus:border-[#D4AF37]"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs text-[#C9C1B1] mb-1.5">{t.seatingLabel}</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                      {(['indoor', 'outdoor', 'family'] as const).map((area) => (
-                        <button
-                          key={area}
-                          type="button"
-                          aria-pressed={seatingPreference === area}
-                          onClick={() => setSeatingPreference(area)}
-                          className={`py-2.5 px-3 text-xs font-bold border transition-colors cursor-pointer ${
-                            seatingPreference === area
-                              ? 'bg-[#D4AF37] text-[#121212] border-[#D4AF37]'
-                              : 'bg-[#121212] text-[#C9C1B1] border-[#D4AF37]/30 hover:border-[#D4AF37]/60'
-                          }`}
-                        >
-                          {t.seatingOptions[area]}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4">
+              {/* Delivery / Takeaway & Payment Fields */}
+              <div className="space-y-4">
                   <div>
                     <label className="block text-xs text-[#C9C1B1] mb-1.5">
                       {t.serviceTypeLabel}
@@ -839,7 +681,6 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
                     )}
                   </div>
                 </div>
-              )}
 
               <div className="space-y-2">
                 <label className="block text-xs text-[#C9C1B1]">{t.notesLabel}</label>
@@ -855,16 +696,14 @@ export const BookingOrderModal: React.FC<BookingOrderModalProps> = ({
 
               <button
                 type="submit"
-                disabled={isCheckingPhone || (activeTab === 'order' && cart.length === 0)}
+                disabled={isCheckingPhone || cart.length === 0}
                 className="w-full py-4 bg-[#D4AF37] hover:bg-[#e3be42] disabled:opacity-40 text-[#121212] font-bold text-sm sm:text-base transition-colors cursor-pointer shadow-[0_0_25px_rgba(212,175,55,0.3)]"
               >
                 {isCheckingPhone
                   ? lang === 'ar'
                     ? 'جاري التحقق من الرقم...'
                     : 'Verifying phone...'
-                  : activeTab === 'reservation'
-                    ? t.submitReserve
-                    : t.submitOrderNow}
+                  : t.submitOrderNow}
               </button>
             </form>
           )}

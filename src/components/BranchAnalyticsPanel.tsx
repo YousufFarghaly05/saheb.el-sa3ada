@@ -27,7 +27,6 @@ import type {
   MenuCategory,
   MenuItem,
   OnlineOrder,
-  Reservation,
 } from '../types.ts';
 import { BRANCH_CONFIGS, BRANCH_ORDER } from '../data/initialData.ts';
 
@@ -38,7 +37,6 @@ interface BranchAnalyticsPanelProps {
   branchConfigs?: Record<BranchId, BranchConfig>;
   stores: DualBranchStoreState;
   orders: OnlineOrder[];
-  reservations: Reservation[];
   menu: MenuItem[];
 }
 
@@ -74,7 +72,6 @@ export const BranchAnalyticsPanel: React.FC<BranchAnalyticsPanelProps> = ({
   branchConfigs = BRANCH_CONFIGS,
   stores,
   orders,
-  reservations,
   menu,
 }) => {
   const [granularity, setGranularity] = useState<TrendGranularity>('daily');
@@ -94,11 +91,6 @@ export const BranchAnalyticsPanel: React.FC<BranchAnalyticsPanelProps> = ({
   const avgOrderValue = useMemo(
     () => (activeOrders.length > 0 ? Math.round(totalRevenue / activeOrders.length) : 0),
     [activeOrders.length, totalRevenue]
-  );
-
-  const activeReservationsCount = useMemo(
-    () => reservations.filter((r) => r.status !== 'cancelled').length,
-    [reservations]
   );
 
   // Anchor rolling window to the latest date between today and the most recent branch order
@@ -357,14 +349,11 @@ export const BranchAnalyticsPanel: React.FC<BranchAnalyticsPanelProps> = ({
 
         <div className="bg-[#1E1E1E] border border-[#D4AF37]/30 p-4">
           <div className="flex items-center justify-between text-xs text-[#C9C1B1] mb-1">
-            <span>{lang === 'ar' ? 'الطلبات والحجوزات النشطة' : 'Active Orders / Bookings'}</span>
+            <span>{lang === 'ar' ? 'الطلبات النشطة' : 'Active Orders'}</span>
             <CalendarDays className="w-4 h-4 text-[#D4AF37]" />
           </div>
           <p className="text-2xl font-bold font-mono tabular-nums text-[#F7F3E9]">
-            {activeOrders.length}{' '}
-            <span className="text-xs font-normal text-[#9E9585]">
-              / {activeReservationsCount} {lang === 'ar' ? 'حجز' : 'res.'}
-            </span>
+            {activeOrders.length}
           </p>
         </div>
 

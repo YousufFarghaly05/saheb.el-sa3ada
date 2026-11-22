@@ -15,8 +15,6 @@ export interface BranchCmsSettings {
   announcementEnabled: boolean;
   announcementTextAr: string;
   announcementTextEn: string;
-  reservationNoteAr: string;
-  reservationNoteEn: string;
   instagramUrl?: string;
   facebookUrl?: string;
   tiktokUrl?: string;
@@ -158,21 +156,6 @@ export interface GalleryPhoto {
   source?: 'curated' | 'uploaded' | 'custom_url';
 }
 
-export interface Reservation {
-  id: string;
-  branchId?: BranchId;
-  customerId?: string;
-  customerName: string;
-  phone: string;
-  guests: number;
-  date: string;
-  time: string;
-  seatingPreference: 'indoor' | 'outdoor' | 'family' | 'stage' | 'lounge';
-  notes: string;
-  status: BookingStatus;
-  createdAt: string;
-}
-
 export interface CartItem {
   menuItemId: string;
   titleAr: string;
@@ -212,7 +195,6 @@ export interface StoreState {
   menu: MenuItem[];
   shows: ShowSchedule[];
   gallery: GalleryPhoto[];
-  reservations: Reservation[];
   orders: OnlineOrder[];
   branchSettings?: Partial<BranchContactSettings>;
   cmsSettings?: Partial<BranchCmsSettings>;

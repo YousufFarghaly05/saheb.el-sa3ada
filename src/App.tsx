@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { AlertCircle, CheckCircle2, X } from 'lucide-react';
-import type { BranchConfig, BranchId, CartItem, Lang, MenuItem, Reservation } from './types.ts';
+import type { BranchConfig, BranchId, CartItem, Lang, MenuItem } from './types.ts';
 import { getEffectiveBranchConfig } from './data/initialData.ts';
 import { useRestaurantStore } from './hooks/useRestaurantStore.ts';
 import { useAuth } from './hooks/useAuth.ts';
@@ -12,7 +12,6 @@ import { DynamicGallery } from './components/DynamicGallery.tsx';
 import { ReviewsSection } from './components/ReviewsSection.tsx';
 import { LocationContact } from './components/LocationContact.tsx';
 import { BookingOrderModal } from './components/BookingOrderModal.tsx';
-import { BookingSuccessModal } from './components/BookingSuccessModal.tsx';
 import { CustomerAuthModal } from './components/CustomerAuthModal.tsx';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { Footer } from './components/Footer.tsx';
@@ -77,12 +76,6 @@ export function App() {
     return window.location.pathname === '/admin' || window.location.hash === '#admin';
   });
   const [modalOpen, setModalOpen] = useState(false);
-  const [modalTab, setModalTab] = useState<'reservation' | 'order'>('order');
-  const [bookingSuccess, setBookingSuccess] = useState<{
-    reservation: Reservation;
-    branchConfig: BranchConfig;
-    whatsappUrl: string;
-  } | null>(null);
   const [customerModalOpen, setCustomerModalOpen] = useState(false);
   const [cart, setCart] = useState<CartItem[]>(getInitialCart);
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState(false);
@@ -127,9 +120,6 @@ export function App() {
     addGalleryPhoto,
     addGalleryPhotosBulk,
     deleteGalleryPhoto,
-    addReservation,
-    updateReservationStatus,
-    deleteReservation,
     addOrder,
     updateOrderStatus,
     cancelOrderByCustomer,
@@ -282,24 +272,12 @@ export function App() {
 
   const handleClearCart = () => setCart([]);
 
-  const openReservationModal = () => {
-    setModalTab('reservation');
-    setModalOpen(true);
-  };
-
   const openOrderModal = () => {
-    setModalTab('order');
     setModalOpen(true);
   };
 
   const totalCartItems = cart.reduce((acc, item) => acc + item.quantity, 0);
   const totalCartAmount = cart.reduce((acc, item) => acc + item.price * item.quantity, 0);
-
-  const customerReservations = customer
-    ? [...activeStore.reservations]
-        .filter((r) => r.customerId === customer.id || r.phone.trim() === customer.phone.trim())
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    : [];
 
   const customerOrders = customer
     ? [...activeStore.orders]
@@ -413,7 +391,6 @@ export function App() {
           menu={adminStore.menu}
           shows={adminStore.shows}
           gallery={adminStore.gallery}
-          reservations={adminStore.reservations}
           orders={adminStore.orders}
           onAddMenu={(item) => addMenuItem(adminBranch, item)}
           onUpdateMenu={(id, item) => updateMenuItem(adminBranch, id, item)}
@@ -424,10 +401,6 @@ export function App() {
           onAddPhoto={(photo) => addGalleryPhoto(adminBranch, photo)}
           onAddPhotosBulk={(photos) => addGalleryPhotosBulk(adminBranch, photos)}
           onDeletePhoto={(id) => deleteGalleryPhoto(adminBranch, id)}
-          onUpdateReservationStatus={(id, status) =>
-            updateReservationStatus(adminBranch, id, status)
-          }
-          onDeleteReservation={(id) => deleteReservation(adminBranch, id)}
           onUpdateOrderStatus={(id, status, bId) =>
             updateOrderStatus(bId || adminBranch, id, status)
           }
@@ -457,7 +430,6 @@ export function App() {
               branchConfig={activeBranchConfig}
               branchConfigs={effectiveBranchConfigs}
               onSwitchBranch={handleSwitchBranch}
-              onOpenReserve={openReservationModal}
               onOpenOrder={openOrderModal}
             />
           </div>
@@ -480,7 +452,6 @@ export function App() {
               lang={lang}
               branchConfig={activeBranchConfig}
               shows={activeStore.shows}
-              onReserveForShow={() => openReservationModal()}
             />
 
             <DynamicGallery lang={lang} gallery={activeStore.gallery} />
@@ -522,24 +493,16 @@ export function App() {
 
       <BookingOrderModal
         isOpen={modalOpen}
-        initialTab={modalTab}
         onClose={() => setModalOpen(false)}
         lang={lang}
         activeBranch={activeBranch}
         branchConfig={activeBranchConfig}
         branchConfigs={effectiveBranchConfigs}
-        reservationNotice={
-          lang === 'ar'
-            ? activeStore.cmsSettings?.reservationNoteAr
-            : activeStore.cmsSettings?.reservationNoteEn || activeStore.cmsSettings?.reservationNoteAr
-        }
         onSwitchBranch={handleSwitchBranch}
         cart={cart}
         customer={customer}
         onUpdateQty={handleUpdateCartQty}
         onClearCart={handleClearCart}
-        onSubmitReservation={(entry) => addReservation(activeBranch, entry)}
-        onReservationSuccess={(payload) => setBookingSuccess(payload)}
         onSubmitOrder={(entry) => {
           const created = addOrder(activeBranch, entry);
           playOrderNotificationChime();
@@ -547,21 +510,11 @@ export function App() {
         }}
       />
 
-      <BookingSuccessModal
-        isOpen={Boolean(bookingSuccess)}
-        reservation={bookingSuccess?.reservation || null}
-        branchConfig={bookingSuccess?.branchConfig || null}
-        whatsappUrl={bookingSuccess?.whatsappUrl || ''}
-        lang={lang}
-        onClose={() => setBookingSuccess(null)}
-      />
-
       <CustomerAuthModal
         isOpen={customerModalOpen}
         onClose={() => setCustomerModalOpen(false)}
         lang={lang}
         customer={customer}
-        customerReservations={customerReservations}
         customerOrders={customerOrders}
         favoriteDishes={favoriteDishes}
         onToggleFavorite={toggleFavoriteDish}

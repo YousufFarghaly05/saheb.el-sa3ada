@@ -1088,8 +1088,8 @@ export const DigitalMenu: React.FC<DigitalMenuProps> = ({
         <footer className="mt-6 pt-3 border-t border-[#B8860B]/60 flex items-center justify-between text-[10px] text-[#4A4338]">
           <span>
             {lang === 'ar'
-              ? `للطلبات السريعة وحجز الطاولات عبر الواتساب (${branchConfig.shortNameAr}): ${branchConfig.phone} · التوصيل والسفري متاح يومياً`
-              : `WhatsApp Reservations & Delivery (${branchConfig.shortNameEn}): ${branchConfig.phone} · Dine-in, Takeaway & Delivery Daily`}
+              ? `للطلبات السريعة عبر الواتساب (${branchConfig.shortNameAr}): ${branchConfig.phone} · التوصيل والسفري متاح يومياً`
+              : `WhatsApp Orders & Delivery (${branchConfig.shortNameEn}): ${branchConfig.phone} · Takeaway & Delivery Daily`}
           </span>
           <span className="font-mono">
             {filteredMenu.length} {t.itemsCount}
